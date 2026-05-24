@@ -1,6 +1,6 @@
 import { test, expect, type Page, type Route } from '@playwright/test';
 
-// 1x1 JPEG fixture for fake file uploads (camera input).
+// 1x1 JPEG fixture for fake file uploads (photo picker).
 function tinyJpeg(): Buffer {
   // Smallest valid JPEG payload.
   return Buffer.from([
@@ -24,38 +24,122 @@ function tinyJpeg(): Buffer {
  * Mocks the Supabase REST + Storage endpoints so the tests don't hit the live
  * database. Mirrors the budget-app pattern of route-level mocking instead of
  * touching prod data.
+ *
+ * v1.5: two tables — meals + meal_photos. Mock keeps an in-memory list per
+ * page-context so multi-step flows (insert meal → insert photo) compose.
  */
 async function mockSupabase(page: Page): Promise<void> {
-  await page.route(/supabase\.co\/rest\/v1\/food_entries.*/, async (route: Route) => {
+  const meals: Array<{
+    id: string;
+    eaten_at: string;
+    description: string | null;
+  }> = [];
+  const mealPhotos: Array<{
+    id: string;
+    meal_id: string;
+    photo_path: string;
+    position: number;
+  }> = [];
+
+  await page.route(/supabase\.co\/rest\/v1\/meals(\?.*)?$/, async (route: Route) => {
     const method = route.request().method();
+    const url = new URL(route.request().url());
     if (method === 'GET') {
+      // Naive: return all meals; order by eaten_at desc.
+      const sorted = [...meals].sort(
+        (a, b) => new Date(b.eaten_at).getTime() - new Date(a.eaten_at).getTime()
+      );
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify([]),
+        body: JSON.stringify(sorted),
       });
       return;
     }
     if (method === 'POST') {
       const body = JSON.parse(route.request().postData() || '{}') as {
         eaten_at: string;
-        photo_path: string;
+        description: string | null;
       };
+      const row = {
+        id: 'mock-meal-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+        eaten_at: body.eaten_at,
+        description: body.description ?? null,
+      };
+      meals.push(row);
       await route.fulfill({
         status: 201,
         contentType: 'application/json',
-        body: JSON.stringify([
-          {
-            id: 'mock-id-' + Date.now(),
-            eaten_at: body.eaten_at,
-            photo_path: body.photo_path,
-            notes: null,
-          },
-        ]),
+        body: JSON.stringify([row]),
+      });
+      return;
+    }
+    if (method === 'PATCH') {
+      const idMatch = url.searchParams.get('id');
+      const id = idMatch?.replace(/^eq\./, '') ?? '';
+      const body = JSON.parse(route.request().postData() || '{}') as {
+        eaten_at?: string;
+        description?: string | null;
+      };
+      const target = meals.find((m) => m.id === id);
+      if (target) {
+        if (body.eaten_at !== undefined) target.eaten_at = body.eaten_at;
+        if (body.description !== undefined) target.description = body.description;
+      }
+      await route.fulfill({ status: 204, body: '' });
+      return;
+    }
+    if (method === 'DELETE') {
+      const idMatch = url.searchParams.get('id');
+      const id = idMatch?.replace(/^eq\./, '') ?? '';
+      const idx = meals.findIndex((m) => m.id === id);
+      if (idx >= 0) meals.splice(idx, 1);
+      // Cascade in mock.
+      for (let i = mealPhotos.length - 1; i >= 0; i--) {
+        if (mealPhotos[i].meal_id === id) mealPhotos.splice(i, 1);
+      }
+      await route.fulfill({ status: 204, body: '' });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.route(/supabase\.co\/rest\/v1\/meal_photos(\?.*)?$/, async (route: Route) => {
+    const method = route.request().method();
+    const url = new URL(route.request().url());
+    if (method === 'GET') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([...mealPhotos].sort((a, b) => a.position - b.position)),
+      });
+      return;
+    }
+    if (method === 'POST') {
+      const body = JSON.parse(route.request().postData() || '{}') as {
+        meal_id: string;
+        photo_path: string;
+        position: number;
+      };
+      const row = {
+        id: 'mock-photo-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+        meal_id: body.meal_id,
+        photo_path: body.photo_path,
+        position: body.position,
+      };
+      mealPhotos.push(row);
+      await route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify([row]),
       });
       return;
     }
     if (method === 'DELETE') {
+      const idMatch = url.searchParams.get('id');
+      const id = idMatch?.replace(/^eq\./, '') ?? '';
+      const idx = mealPhotos.findIndex((p) => p.id === id);
+      if (idx >= 0) mealPhotos.splice(idx, 1);
       await route.fulfill({ status: 204, body: '' });
       return;
     }
@@ -95,112 +179,214 @@ test.beforeEach(async ({ page }) => {
     // Wipe any IDB queue from a previous test.
     indexedDB.deleteDatabase('food-log-queue');
   });
+  // Auto-accept the "Discard?" confirm if it fires (it shouldn't in happy paths).
+  page.on('dialog', (dialog) => {
+    void dialog.accept();
+  });
   await page.goto('/');
 });
 
-test('home screen renders title + camera button + empty today', async ({ page }) => {
+test('home screen renders title + add-meal button + empty today', async ({ page }) => {
   await expect(page.locator('h1')).toHaveText('Food Log');
-  await expect(page.locator('#camera-btn')).toBeVisible();
-  await expect(page.locator('.today-empty')).toContainText('No photos yet today');
+  await expect(page.locator('#add-meal-btn')).toBeVisible();
+  await expect(page.locator('.today-empty')).toContainText('No meals yet today');
 });
 
-test('camera button is wired to a hidden file input with capture=environment', async ({ page }) => {
-  const input = page.locator('#camera-input');
-  await expect(input).toHaveAttribute('accept', 'image/*');
-  await expect(input).toHaveAttribute('capture', 'environment');
-  await expect(input).toHaveAttribute('type', 'file');
+test('add-meal button opens the meal-entry sheet with time + textarea + add-photo', async ({
+  page,
+}) => {
+  await page.locator('#add-meal-btn').click();
+  await expect(page.locator('.sheet-panel')).toBeVisible();
+  const timeInput = page.locator('#sheet-time');
+  await expect(timeInput).toHaveAttribute('type', 'datetime-local');
+  await expect(timeInput).not.toHaveValue('');
+  await expect(page.locator('#sheet-desc')).toBeVisible();
+  await expect(page.locator('#sheet-add-photo')).toBeVisible();
+  // The hidden photo input pre-selects rear camera on phones.
+  const photoInput = page.locator('#sheet-photo-input');
+  await expect(photoInput).toHaveAttribute('accept', 'image/*');
+  await expect(photoInput).toHaveAttribute('capture', 'environment');
 });
 
-test('header date label is present (defensive — proves the header renders)', async ({ page }) => {
-  await expect(page.locator('.header-sub')).toBeVisible();
+test('Save button is disabled when both description and photos are empty', async ({ page }) => {
+  await page.locator('#add-meal-btn').click();
+  const save = page.locator('#sheet-save');
+  await expect(save).toBeDisabled();
 });
 
-test('uploading a photo prepends it to today with HH:mm time', async ({ page }) => {
-  const input = page.locator('#camera-input');
-  await input.setInputFiles({
+test('Save button enables once description is typed', async ({ page }) => {
+  await page.locator('#add-meal-btn').click();
+  await page.locator('#sheet-desc').fill('chicken salad with hummus');
+  await expect(page.locator('#sheet-save')).toBeEnabled();
+});
+
+test('Save button enables once a photo is added (no text)', async ({ page }) => {
+  await page.locator('#add-meal-btn').click();
+  await page.locator('#sheet-photo-input').setInputFiles({
     name: 'meal.jpg',
     mimeType: 'image/jpeg',
     buffer: tinyJpeg(),
   });
+  await expect(page.locator('.sheet-thumb-draft')).toHaveCount(1);
+  await expect(page.locator('#sheet-save')).toBeEnabled();
+});
 
-  // First tile in today's strip = the just-uploaded photo, with a time label.
-  const firstTile = page.locator('.today-strip .photo-tile').first();
-  await expect(firstTile).toBeVisible({ timeout: 5000 });
-  const timeText = await firstTile.locator('.photo-tile-time').textContent();
-  expect(timeText).toMatch(/^\d{2}:\d{2}$/);
+test('save a description-only meal (no photos)', async ({ page }) => {
+  await page.locator('#add-meal-btn').click();
+  await page.locator('#sheet-desc').fill('two eggs and toast');
+  await page.locator('#sheet-save').click();
 
-  // Toast indicates save succeeded.
+  // Sheet closes, meal card appears in today list with the description preview.
+  await expect(page.locator('.sheet-panel')).toHaveCount(0);
+  const firstCard = page.locator('.meal-list .meal-card').first();
+  await expect(firstCard).toBeVisible({ timeout: 5000 });
+  await expect(firstCard.locator('.meal-card-desc')).toContainText('two eggs and toast');
+  // No photo strip when no photos.
+  await expect(firstCard.locator('.meal-card-photos')).toHaveCount(0);
   await expect(page.locator('.toast')).toContainText(/saved/);
 });
 
-test('photo count on Today card updates after upload', async ({ page }) => {
-  const input = page.locator('#camera-input');
-  await input.setInputFiles({
+test('save a meal with one photo + description', async ({ page }) => {
+  await page.locator('#add-meal-btn').click();
+  await page.locator('#sheet-desc').fill('avocado toast');
+  await page.locator('#sheet-photo-input').setInputFiles({
     name: 'meal.jpg',
     mimeType: 'image/jpeg',
     buffer: tinyJpeg(),
   });
-  await expect(page.locator('.card-meta').first()).toContainText('1 photo');
+  await page.locator('#sheet-save').click();
 
-  await input.setInputFiles({
-    name: 'meal2.jpg',
-    mimeType: 'image/jpeg',
-    buffer: tinyJpeg(),
-  });
-  await expect(page.locator('.card-meta').first()).toContainText('2 photos');
+  const firstCard = page.locator('.meal-list .meal-card').first();
+  await expect(firstCard).toBeVisible({ timeout: 5000 });
+  await expect(firstCard.locator('.meal-card-desc')).toContainText('avocado toast');
+  await expect(firstCard.locator('.meal-card-photo')).toHaveCount(1);
 });
 
-test('tapping a thumbnail opens the lightbox with time + close button', async ({ page }) => {
-  const input = page.locator('#camera-input');
-  await input.setInputFiles({
-    name: 'meal.jpg',
-    mimeType: 'image/jpeg',
-    buffer: tinyJpeg(),
-  });
-  await page.locator('.today-strip .photo-tile').first().click();
+test('save a meal with multiple photos + description', async ({ page }) => {
+  await page.locator('#add-meal-btn').click();
+  await page.locator('#sheet-desc').fill('lunch spread');
+  const input = page.locator('#sheet-photo-input');
+  await input.setInputFiles({ name: 'a.jpg', mimeType: 'image/jpeg', buffer: tinyJpeg() });
+  await input.setInputFiles({ name: 'b.jpg', mimeType: 'image/jpeg', buffer: tinyJpeg() });
+  await input.setInputFiles({ name: 'c.jpg', mimeType: 'image/jpeg', buffer: tinyJpeg() });
+  await expect(page.locator('.sheet-thumb-draft')).toHaveCount(3);
+  await page.locator('#sheet-save').click();
+
+  const firstCard = page.locator('.meal-list .meal-card').first();
+  await expect(firstCard).toBeVisible({ timeout: 5000 });
+  await expect(firstCard.locator('.meal-card-photo')).toHaveCount(3);
+});
+
+test('time field defaults to now (today) and is editable', async ({ page }) => {
+  await page.locator('#add-meal-btn').click();
+  const time = page.locator('#sheet-time');
+  const defaultVal = await time.inputValue();
+  // datetime-local format: YYYY-MM-DDTHH:mm — must be today's date.
+  const today = new Date();
+  const yyyy = today.getFullYear().toString();
+  const mo = (today.getMonth() + 1).toString().padStart(2, '0');
+  const da = today.getDate().toString().padStart(2, '0');
+  expect(defaultVal.startsWith(`${yyyy}-${mo}-${da}T`)).toBe(true);
+
+  // Editing it should stick.
+  const edited = `${yyyy}-${mo}-${da}T08:30`;
+  await time.fill(edited);
+  await expect(time).toHaveValue(edited);
+});
+
+test('meal count on Today card updates after saves', async ({ page }) => {
+  // First meal.
+  await page.locator('#add-meal-btn').click();
+  await page.locator('#sheet-desc').fill('a');
+  await page.locator('#sheet-save').click();
+  await expect(page.locator('.card-meta').first()).toContainText('1 meal');
+
+  // Second meal.
+  await page.locator('#add-meal-btn').click();
+  await page.locator('#sheet-desc').fill('b');
+  await page.locator('#sheet-save').click();
+  await expect(page.locator('.card-meta').first()).toContainText('2 meals');
+});
+
+test('tapping a meal card opens the lightbox with time, description, edit, close', async ({
+  page,
+}) => {
+  await page.locator('#add-meal-btn').click();
+  await page.locator('#sheet-desc').fill('grilled salmon');
+  await page.locator('#sheet-save').click();
+  await page.locator('.meal-list .meal-card').first().click();
   await expect(page.locator('.lightbox')).toBeVisible();
   await expect(page.locator('.lightbox-time')).toHaveText(/^\d{2}:\d{2}$/);
+  await expect(page.locator('.lightbox-desc')).toContainText('grilled salmon');
+  await expect(page.locator('.lightbox-edit')).toBeVisible();
   await expect(page.locator('.lightbox-close')).toBeVisible();
   await page.locator('.lightbox-close').click();
   await expect(page.locator('.lightbox')).toHaveCount(0);
 });
 
-test('history section renders prior days when entries exist for them', async ({ browser }) => {
-  // Use a fresh context so the service worker from beforeEach's empty-fetch
-  // doesn't return a cached empty list ahead of our seeded mock.
-  const context = await browser.newContext();
-  const page = await context.newPage();
-  await page.route(/supabase\.co\/rest\/v1\/food_entries.*/, async (route: Route) => {
-    const method = route.request().method();
-    if (method === 'GET') {
-      const yesterday = new Date();
-      yesterday.setDate(yesterday.getDate() - 1);
-      yesterday.setHours(12, 30, 0, 0);
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify([
-          {
-            id: 'hist-1',
-            eaten_at: yesterday.toISOString(),
-            photo_path: '2026/05/hist-1.jpg',
-            notes: null,
-          },
-        ]),
-      });
-      return;
-    }
-    await route.continue();
+test('editing a meal changes the description', async ({ page }) => {
+  await page.locator('#add-meal-btn').click();
+  await page.locator('#sheet-desc').fill('original text');
+  await page.locator('#sheet-save').click();
+  await page.locator('.meal-list .meal-card').first().click();
+  await page.locator('.lightbox-edit').click();
+  await expect(page.locator('.sheet-panel')).toBeVisible();
+  // Edit dialog pre-populated.
+  await expect(page.locator('#sheet-desc')).toHaveValue('original text');
+  await page.locator('#sheet-desc').fill('edited text');
+  await page.locator('#sheet-save').click();
+  // Card now shows the new text.
+  const firstCard = page.locator('.meal-list .meal-card').first();
+  await expect(firstCard.locator('.meal-card-desc')).toContainText('edited text');
+});
+
+test('editing a meal can add a new photo', async ({ page }) => {
+  // Start with a description-only meal.
+  await page.locator('#add-meal-btn').click();
+  await page.locator('#sheet-desc').fill('breakfast');
+  await page.locator('#sheet-save').click();
+  // Open lightbox → edit.
+  await page.locator('.meal-list .meal-card').first().click();
+  await page.locator('.lightbox-edit').click();
+  // Add a photo.
+  await page.locator('#sheet-photo-input').setInputFiles({
+    name: 'b.jpg',
+    mimeType: 'image/jpeg',
+    buffer: tinyJpeg(),
   });
-  await page.route(/supabase\.co\/storage\/v1\/object\/.*/, async (route: Route) => {
-    await route.fulfill({ status: 200, contentType: 'image/jpeg', body: tinyJpeg() });
-  });
-  await page.goto('/');
-  const yesterdayPanel = page.locator('.history-day').first();
-  await expect(yesterdayPanel).toBeVisible();
-  await expect(yesterdayPanel.locator('.history-day-title')).toHaveText('Yesterday');
-  await expect(yesterdayPanel.locator('.history-day-count')).toContainText('1 photo');
-  await context.close();
+  await expect(page.locator('.sheet-thumb-draft')).toHaveCount(1);
+  await page.locator('#sheet-save').click();
+  // Card now has 1 photo.
+  await expect(
+    page.locator('.meal-list .meal-card').first().locator('.meal-card-photo')
+  ).toHaveCount(1);
+});
+
+test('editing a meal can remove a photo', async ({ page }) => {
+  // Save a meal with 2 photos.
+  await page.locator('#add-meal-btn').click();
+  await page.locator('#sheet-desc').fill('lunch');
+  const input = page.locator('#sheet-photo-input');
+  await input.setInputFiles({ name: 'a.jpg', mimeType: 'image/jpeg', buffer: tinyJpeg() });
+  await input.setInputFiles({ name: 'b.jpg', mimeType: 'image/jpeg', buffer: tinyJpeg() });
+  await page.locator('#sheet-save').click();
+  await expect(
+    page.locator('.meal-list .meal-card').first().locator('.meal-card-photo')
+  ).toHaveCount(2);
+
+  // Open edit, remove one.
+  await page.locator('.meal-list .meal-card').first().click();
+  await page.locator('.lightbox-edit').click();
+  // 2 existing photos in the sheet (non-draft).
+  const existingThumbs = page.locator('.sheet-thumb:not(.sheet-thumb-draft)');
+  await expect(existingThumbs).toHaveCount(2);
+  await existingThumbs.first().locator('.sheet-thumb-remove').click();
+  await page.locator('#sheet-save').click();
+
+  // Card now has 1 photo.
+  await expect(
+    page.locator('.meal-list .meal-card').first().locator('.meal-card-photo')
+  ).toHaveCount(1);
 });
 
 test('manifest.webmanifest is served and lists the right name + theme color', async ({ page }) => {
@@ -214,7 +400,6 @@ test('manifest.webmanifest is served and lists the right name + theme color', as
 });
 
 test('repo ships rasterized PNG icons that the manifest references', async ({ page }) => {
-  // Fetch each icon via the dev server — a missing PNG file shows up as 404.
   for (const f of ['icon-192.png', 'icon-512.png', 'icon-maskable-512.png', 'icon.svg']) {
     const res = await page.request.get(`/${f}`);
     expect(res.ok(), `${f} should be served`).toBeTruthy();
@@ -229,7 +414,7 @@ test('service worker file is served at /sw.js and references our shell assets', 
   const res = await page.request.get('/sw.js');
   expect(res.ok()).toBeTruthy();
   const body = await res.text();
-  expect(body).toContain('food-log-v1');
+  expect(body).toContain('food-log-v1-5');
   expect(body).toContain('./dist/app.js');
   expect(body).toContain('./manifest.webmanifest');
 });

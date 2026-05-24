@@ -1,16 +1,14 @@
 /* ----------------------------------------------------------------------------
  * food-log — warm, food-friendly palette.
  *
- * v1 surface = one screen. Big camera button bottom, today's photo strip top,
- * collapsible history of prior days below. No login, no typing.
+ * v1.5 surface: a "meal" is the atom. Each meal can carry 0+ photos and/or a
+ * written/voice-to-text description. The add/edit meal sheet drives all
+ * entry — tap "Add a meal" → modal opens → time + textarea + photo list +
+ * save. Meal cards on Today/History show time, photo strip (if any), and a
+ * description preview.
  *
- * Palette is intentionally NOT the workout app's dark green. Soft cream
- * background, warm peach accents, olive for secondary actions. DM Sans for
- * family consistency with the sibling apps.
- *
- * If a future iteration wants RTL (e.g. Hebrew captions), nothing here breaks:
- * margins/padding use logical properties OR are symmetric, and we never key
- * layout off left/right pixel offsets.
+ * Palette unchanged from v1 (cream / peach / olive). DM Sans for family
+ * consistency. Logical inset properties so future RTL doesn't break.
  * --------------------------------------------------------------------------- */
 
 :root {
@@ -107,7 +105,7 @@ button {
 .app {
   max-width: 640px;
   margin: 0 auto;
-  padding: 16px 16px 140px; /* bottom padding leaves room for the floating camera button */
+  padding: 16px 16px 140px; /* bottom padding leaves room for the floating button */
 }
 
 .app-header {
@@ -161,18 +159,12 @@ button {
   color: var(--text-dim);
 }
 
-/* --- Today strip ---------------------------------------------------------- */
+/* --- Meal list (Today + history days) ----------------------------------- */
 
-.today-strip {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
+.meal-list {
+  display: flex;
+  flex-direction: column;
   gap: 10px;
-}
-
-@media (min-width: 480px) {
-  .today-strip {
-    grid-template-columns: repeat(4, 1fr);
-  }
 }
 
 .today-empty {
@@ -182,46 +174,38 @@ button {
   font-size: var(--font-small);
 }
 
-.photo-tile {
-  position: relative;
-  aspect-ratio: 1 / 1;
-  border-radius: var(--radius-sm);
-  overflow: hidden;
+/* Each meal card: a button so the whole row is tappable for the lightbox. */
+.meal-card {
+  display: block;
+  width: 100%;
+  text-align: start;
   background: var(--bg-elev-2);
   border: 1px solid var(--border);
-  cursor: pointer;
+  border-radius: var(--radius);
+  padding: 12px;
   transition: transform var(--dur-base) var(--ease-spring);
 }
 
-.photo-tile:active {
-  transform: scale(0.96);
+.meal-card:active {
+  transform: scale(0.985);
+  background: var(--bg-elev-3);
 }
 
-.photo-tile img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
+.meal-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
 }
 
-.photo-tile-time {
-  position: absolute;
-  inset-inline-start: 6px;
-  inset-block-end: 6px;
-  background: rgba(58, 46, 31, 0.78);
-  color: #fff4e6;
-  font-size: var(--font-micro);
-  font-weight: 600;
-  letter-spacing: 0.4px;
-  padding: 3px 8px;
-  border-radius: var(--radius-pill);
-  backdrop-filter: blur(4px);
+.meal-card-time {
+  font-size: var(--font-small);
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--text);
 }
 
-.photo-tile-pending {
-  position: absolute;
-  inset-inline-end: 6px;
-  inset-block-start: 6px;
+.meal-card-pending {
   background: var(--accent-warn);
   color: #3a2e1f;
   font-size: var(--font-micro);
@@ -230,6 +214,47 @@ button {
   padding: 3px 8px;
   border-radius: var(--radius-pill);
   text-transform: uppercase;
+}
+
+.meal-card-photos {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  margin-bottom: 8px;
+  padding-bottom: 2px;
+  -webkit-overflow-scrolling: touch;
+}
+
+.meal-card-photo {
+  flex: 0 0 auto;
+  width: 72px;
+  height: 72px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+}
+
+.meal-card-photo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.meal-card-desc {
+  font-size: var(--font-small);
+  color: var(--text);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.meal-card-desc-empty {
+  color: var(--text-dim-2);
+  font-style: italic;
 }
 
 /* --- History (collapsed prior days) -------------------------------------- */
@@ -274,11 +299,6 @@ button {
   padding: 0 16px 16px;
 }
 
-.history-day .today-strip {
-  /* reuse grid for expanded day photos */
-  margin-top: 4px;
-}
-
 .history-empty {
   padding: 20px;
   text-align: center;
@@ -286,7 +306,7 @@ button {
   font-size: var(--font-small);
 }
 
-/* --- Camera button (floating) -------------------------------------------- */
+/* --- Add-meal floating button --------------------------------------------- */
 
 .camera-fab {
   position: fixed;
@@ -353,7 +373,7 @@ button {
   border-radius: var(--radius);
   font-size: var(--font-small);
   text-align: center;
-  z-index: 60;
+  z-index: 200;
   opacity: 0;
   transform: translateY(8px);
   transition:
@@ -367,23 +387,41 @@ button {
   transform: translateY(0);
 }
 
-/* --- Photo lightbox ------------------------------------------------------ */
+/* --- Photo lightbox (meal detail) ---------------------------------------- */
 
 .lightbox {
   position: fixed;
   inset: 0;
   background: rgba(58, 46, 31, 0.92);
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
   z-index: 100;
   padding: 24px;
+  overflow-y: auto;
 }
 
-.lightbox img {
+.lightbox-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: 720px;
+  width: 100%;
+}
+
+.lightbox-gallery {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
+  width: 100%;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.lightbox-gallery img {
   max-width: 100%;
-  max-height: 70vh;
+  max-height: 60vh;
   border-radius: var(--radius);
   object-fit: contain;
 }
@@ -396,6 +434,16 @@ button {
   letter-spacing: var(--track-tight);
 }
 
+.lightbox-desc {
+  color: #fff4e6;
+  margin-top: 12px;
+  font-size: var(--font-body);
+  line-height: 1.5;
+  text-align: center;
+  white-space: pre-wrap;
+  max-width: 560px;
+}
+
 .lightbox-actions {
   margin-top: 20px;
   display: flex;
@@ -404,7 +452,8 @@ button {
   justify-content: center;
 }
 
-.lightbox-close {
+.lightbox-close,
+.lightbox-edit {
   background: rgba(255, 244, 230, 0.16);
   color: #fff4e6;
   padding: 10px 22px;
@@ -412,6 +461,11 @@ button {
   border: 1px solid rgba(255, 244, 230, 0.24);
   font-size: var(--font-small);
   font-weight: 600;
+}
+
+.lightbox-edit {
+  background: var(--accent);
+  border-color: var(--accent-press);
 }
 
 .lightbox-delete {
@@ -443,6 +497,259 @@ button {
 .lightbox-delete-label {
   position: relative;
   z-index: 1;
+}
+
+/* --- Meal-entry sheet (modal) ------------------------------------------- */
+
+.sheet-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(58, 46, 31, 0.55);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  z-index: 150;
+  padding: 0;
+}
+
+@media (min-width: 520px) {
+  .sheet-overlay {
+    align-items: center;
+    padding: 24px;
+  }
+}
+
+.sheet-panel {
+  background: var(--bg-elev);
+  width: 100%;
+  max-width: 560px;
+  max-height: 92vh;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+}
+
+@media (min-width: 520px) {
+  .sheet-panel {
+    border-radius: var(--radius-lg);
+    max-height: 90vh;
+  }
+}
+
+.sheet-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-divider);
+}
+
+.sheet-title {
+  margin: 0;
+  font-size: var(--font-subheading);
+  font-weight: 700;
+  letter-spacing: var(--track-tight);
+}
+
+.sheet-close {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text-dim);
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-pill);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sheet-close:hover {
+  background: var(--bg-elev-2);
+  color: var(--text);
+}
+
+.sheet-body {
+  padding: 16px 20px;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.sheet-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sheet-label {
+  font-size: var(--font-meta);
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: var(--track-label);
+}
+
+.sheet-time {
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  font-size: var(--font-body);
+  font-family: inherit;
+  color: var(--text);
+  width: 100%;
+}
+
+.sheet-desc {
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  font-size: var(--font-body);
+  font-family: inherit;
+  color: var(--text);
+  width: 100%;
+  resize: vertical;
+  min-height: 88px;
+  line-height: 1.45;
+}
+
+.sheet-desc::placeholder {
+  color: var(--text-dim-2);
+}
+
+.sheet-thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.sheet-thumb {
+  position: relative;
+  width: 92px;
+  height: 92px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+}
+
+.sheet-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.sheet-thumb-removed {
+  opacity: 0.4;
+}
+
+.sheet-thumb-remove,
+.sheet-thumb-restore {
+  position: absolute;
+  inset-block-start: 4px;
+  inset-inline-end: 4px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: rgba(58, 46, 31, 0.78);
+  color: #fff4e6;
+  font-size: 13px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sheet-thumb-reorder {
+  position: absolute;
+  inset-block-end: 4px;
+  inset-inline-start: 4px;
+  display: flex;
+  gap: 2px;
+}
+
+.sheet-thumb-arrow {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: rgba(58, 46, 31, 0.78);
+  color: #fff4e6;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sheet-thumb-arrow[disabled] {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.sheet-add-photo {
+  align-self: flex-start;
+  background: var(--bg-elev-2);
+  color: var(--text);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  padding: 10px 16px;
+  font-size: var(--font-small);
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sheet-add-photo:hover {
+  background: var(--bg-elev-3);
+}
+
+.sheet-footer {
+  display: flex;
+  gap: 10px;
+  padding: 14px 20px calc(14px + env(safe-area-inset-bottom, 0));
+  border-top: 1px solid var(--border-divider);
+  background: var(--bg-elev);
+}
+
+.sheet-cancel {
+  flex: 0 0 auto;
+  background: var(--bg-elev-2);
+  color: var(--text);
+  padding: 12px 18px;
+  border-radius: var(--radius-pill);
+  font-size: var(--font-small);
+  font-weight: 600;
+  border: 1px solid var(--border);
+}
+
+.sheet-save {
+  flex: 1 1 auto;
+  background: var(--accent);
+  color: #fff;
+  padding: 12px 24px;
+  border-radius: var(--radius-pill);
+  font-size: var(--font-body);
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  border: 1px solid var(--accent-press);
+}
+
+.sheet-save:hover {
+  background: var(--accent-hover);
+}
+
+.sheet-save[disabled] {
+  background: var(--bg-elev-3);
+  color: var(--text-dim-2);
+  border-color: var(--border);
+  cursor: not-allowed;
 }
 
 /* --- Status / pending banner --------------------------------------------- */
