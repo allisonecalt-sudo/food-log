@@ -1,3 +1,12 @@
+// food-log Playwright suite — v1.6.
+//
+// v1.6 changes vs v1.5.1:
+//   - The split #sheet-date + #sheet-time inputs are now hidden behind the
+//     Custom chip. Default is the Now chip — chip-row drives time at save.
+//   - Sibling pill buttons replace the bottom FAB. #add-meal-btn is now the
+//     header pill; #add-weight-btn is its sibling.
+//   - New weight_log surface (table mocked below), quick-sheet with chip row +
+//     numeric kg + optional notes; home section under meals.
 import { test, expect, type Page, type Route } from '@playwright/test';
 
 // 1x1 JPEG fixture for fake file uploads (photo picker).
@@ -39,6 +48,12 @@ async function mockSupabase(page: Page): Promise<void> {
     meal_id: string;
     photo_path: string;
     position: number;
+  }> = [];
+  const weightLog: Array<{
+    id: string;
+    measured_at: string;
+    weight_kg: number;
+    notes: string | null;
   }> = [];
 
   await page.route(/supabase\.co\/rest\/v1\/meals(\?.*)?$/, async (route: Route) => {
@@ -146,6 +161,68 @@ async function mockSupabase(page: Page): Promise<void> {
     await route.continue();
   });
 
+  await page.route(/supabase\.co\/rest\/v1\/weight_log(\?.*)?$/, async (route: Route) => {
+    const method = route.request().method();
+    const url = new URL(route.request().url());
+    if (method === 'GET') {
+      const sorted = [...weightLog].sort(
+        (a, b) => new Date(b.measured_at).getTime() - new Date(a.measured_at).getTime()
+      );
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(sorted),
+      });
+      return;
+    }
+    if (method === 'POST') {
+      const body = JSON.parse(route.request().postData() || '{}') as {
+        measured_at: string;
+        weight_kg: number;
+        notes: string | null;
+      };
+      const row = {
+        id: 'mock-weight-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+        measured_at: body.measured_at,
+        weight_kg: body.weight_kg,
+        notes: body.notes ?? null,
+      };
+      weightLog.push(row);
+      await route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify([row]),
+      });
+      return;
+    }
+    if (method === 'PATCH') {
+      const idMatch = url.searchParams.get('id');
+      const id = idMatch?.replace(/^eq\./, '') ?? '';
+      const body = JSON.parse(route.request().postData() || '{}') as {
+        measured_at?: string;
+        weight_kg?: number;
+        notes?: string | null;
+      };
+      const target = weightLog.find((w) => w.id === id);
+      if (target) {
+        if (body.measured_at !== undefined) target.measured_at = body.measured_at;
+        if (body.weight_kg !== undefined) target.weight_kg = body.weight_kg;
+        if (body.notes !== undefined) target.notes = body.notes;
+      }
+      await route.fulfill({ status: 204, body: '' });
+      return;
+    }
+    if (method === 'DELETE') {
+      const idMatch = url.searchParams.get('id');
+      const id = idMatch?.replace(/^eq\./, '') ?? '';
+      const idx = weightLog.findIndex((w) => w.id === id);
+      if (idx >= 0) weightLog.splice(idx, 1);
+      await route.fulfill({ status: 204, body: '' });
+      return;
+    }
+    await route.continue();
+  });
+
   await page.route(/supabase\.co\/storage\/v1\/object\/.*/, async (route: Route) => {
     const method = route.request().method();
     if (method === 'POST' || method === 'PUT') {
@@ -174,11 +251,20 @@ async function mockSupabase(page: Page): Promise<void> {
 }
 
 test.beforeEach(async ({ page }) => {
-  await mockSupabase(page);
+  // Disable the service worker for tests. When the SW is active it intercepts
+  // Supabase REST GETs (network-first cache) and our page.route mocks lose
+  // the race for those requests — meal_photos in particular slipped through
+  // to the live server in v1.5 tests. Killing navigator.serviceWorker
+  // pre-script keeps the SW registration call a no-op.
   await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'serviceWorker', {
+      value: undefined,
+      configurable: true,
+    });
     // Wipe any IDB queue from a previous test.
     indexedDB.deleteDatabase('food-log-queue');
   });
+  await mockSupabase(page);
   // Auto-accept the "Discard?" confirm if it fires (it shouldn't in happy paths).
   page.on('dialog', (dialog) => {
     void dialog.accept();
@@ -189,23 +275,96 @@ test.beforeEach(async ({ page }) => {
 test('home screen renders title + add-meal button + empty today', async ({ page }) => {
   await expect(page.locator('h1')).toHaveText('Food Log');
   await expect(page.locator('#add-meal-btn')).toBeVisible();
-  await expect(page.locator('.today-empty')).toContainText('No meals yet today');
+  // v1.6: there are two .today-empty messages on a fresh home (meals + weight).
+  // Scope the meal empty-state to the first card so the selector is unambiguous.
+  await expect(page.locator('.card').first().locator('.today-empty')).toContainText(
+    'No meals yet today'
+  );
 });
 
-test('add-meal button opens the meal-entry sheet with time + textarea + add-photo', async ({
+test('add-meal button opens the meal-entry sheet with chip-row + textarea + add-photo', async ({
   page,
 }) => {
   await page.locator('#add-meal-btn').click();
   await expect(page.locator('.sheet-panel')).toBeVisible();
-  const timeInput = page.locator('#sheet-time');
-  await expect(timeInput).toHaveAttribute('type', 'datetime-local');
-  await expect(timeInput).not.toHaveValue('');
+  // v1.6 — chip row replaces the always-visible date+time inputs.
+  for (const id of ['now', 'morning', 'midday', 'afternoon', 'evening', 'late', 'custom']) {
+    await expect(page.locator(`#meal-chip-${id}`)).toBeVisible();
+  }
+  // Now chip is default-selected.
+  await expect(page.locator('#meal-chip-now')).toHaveClass(/chip-selected/);
+  // Custom-mode inputs exist but their row is hidden until Custom is tapped.
+  await expect(page.locator('#sheet-custom-row')).not.toHaveClass(/visible/);
   await expect(page.locator('#sheet-desc')).toBeVisible();
   await expect(page.locator('#sheet-add-photo')).toBeVisible();
   // The hidden photo input pre-selects rear camera on phones.
   const photoInput = page.locator('#sheet-photo-input');
   await expect(photoInput).toHaveAttribute('accept', 'image/*');
   await expect(photoInput).toHaveAttribute('capture', 'environment');
+});
+
+test('tapping a chip selects it, tapping Custom expands the date+time inputs', async ({ page }) => {
+  await page.locator('#add-meal-btn').click();
+  await page.locator('#meal-chip-morning').click();
+  await expect(page.locator('#meal-chip-morning')).toHaveClass(/chip-selected/);
+  await expect(page.locator('#meal-chip-now')).not.toHaveClass(/chip-selected/);
+  // The visible chip-display label updates.
+  await expect(page.locator('#sheet-chip-display')).toHaveText('Morning');
+  // Custom inputs still hidden.
+  await expect(page.locator('#sheet-custom-row')).not.toHaveClass(/visible/);
+  // Tap Custom — inputs appear.
+  await page.locator('#meal-chip-custom').click();
+  await expect(page.locator('#sheet-custom-row')).toHaveClass(/visible/);
+  await expect(page.locator('#sheet-date')).toBeVisible();
+  await expect(page.locator('#sheet-time')).toBeVisible();
+});
+
+test('saving a meal with the Morning chip lands eaten_at at 09:00 today', async ({ page }) => {
+  await page.locator('#add-meal-btn').click();
+  await page.locator('#meal-chip-morning').click();
+  await page.locator('#sheet-desc').fill('eggs');
+  await page.locator('#sheet-save').click();
+  const firstCard = page.locator('.meal-list .meal-card').first();
+  await expect(firstCard).toBeVisible({ timeout: 5000 });
+  await expect(firstCard.locator('.meal-card-time')).toHaveText('09:00');
+});
+
+test('editing a 09:15 meal pre-selects the Morning chip', async ({ page }) => {
+  // Seed via the API directly so we control eaten_at down to the minute.
+  const today = new Date();
+  const seed = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 9, 15, 0);
+  await page.evaluate(async (iso) => {
+    const res = await fetch('https://hpiyvnfhoqnnnotrmwaz.supabase.co/rest/v1/meals', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ eaten_at: iso, description: 'pre-seeded breakfast' }),
+    });
+    return res.status;
+  }, seed.toISOString());
+  await page.reload();
+  await page.locator('.meal-list .meal-card').first().click();
+  await page.locator('.lightbox-edit').click();
+  await expect(page.locator('#meal-chip-morning')).toHaveClass(/chip-selected/);
+  await expect(page.locator('#sheet-custom-row')).not.toHaveClass(/visible/);
+});
+
+test('editing a meal with an off-hours time lands on Custom mode', async ({ page }) => {
+  // 02:30 today — outside any chip's ±90min window.
+  const today = new Date();
+  const seed = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 2, 30, 0);
+  await page.evaluate(async (iso) => {
+    await fetch('https://hpiyvnfhoqnnnotrmwaz.supabase.co/rest/v1/meals', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ eaten_at: iso, description: '2am snack' }),
+    });
+  }, seed.toISOString());
+  await page.reload();
+  await page.locator('.meal-list .meal-card').first().click();
+  await page.locator('.lightbox-edit').click();
+  await expect(page.locator('#meal-chip-custom')).toHaveClass(/chip-selected/);
+  await expect(page.locator('#sheet-custom-row')).toHaveClass(/visible/);
+  await expect(page.locator('#sheet-time')).toHaveValue('02:30');
 });
 
 test('Save button is disabled when both description and photos are empty', async ({ page }) => {
@@ -277,21 +436,25 @@ test('save a meal with multiple photos + description', async ({ page }) => {
   await expect(firstCard.locator('.meal-card-photo')).toHaveCount(3);
 });
 
-test('time field defaults to now (today) and is editable', async ({ page }) => {
+test('Custom-mode date + time fields default to now and persist on save', async ({ page }) => {
   await page.locator('#add-meal-btn').click();
+  await page.locator('#meal-chip-custom').click();
+  const date = page.locator('#sheet-date');
   const time = page.locator('#sheet-time');
-  const defaultVal = await time.inputValue();
-  // datetime-local format: YYYY-MM-DDTHH:mm — must be today's date.
   const today = new Date();
   const yyyy = today.getFullYear().toString();
   const mo = (today.getMonth() + 1).toString().padStart(2, '0');
   const da = today.getDate().toString().padStart(2, '0');
-  expect(defaultVal.startsWith(`${yyyy}-${mo}-${da}T`)).toBe(true);
+  await expect(date).toHaveValue(`${yyyy}-${mo}-${da}`);
+  expect(await time.inputValue()).toMatch(/^\d{2}:\d{2}$/);
 
-  // Editing it should stick.
-  const edited = `${yyyy}-${mo}-${da}T08:30`;
-  await time.fill(edited);
-  await expect(time).toHaveValue(edited);
+  // Set a precise time and save — Custom path should write that exact time.
+  await time.fill('08:30');
+  await page.locator('#sheet-desc').fill('breakfast');
+  await page.locator('#sheet-save').click();
+  const firstCard = page.locator('.meal-list .meal-card').first();
+  await expect(firstCard).toBeVisible({ timeout: 5000 });
+  await expect(firstCard.locator('.meal-card-time')).toHaveText('08:30');
 });
 
 test('meal count on Today card updates after saves', async ({ page }) => {
@@ -414,7 +577,88 @@ test('service worker file is served at /sw.js and references our shell assets', 
   const res = await page.request.get('/sw.js');
   expect(res.ok()).toBeTruthy();
   const body = await res.text();
-  expect(body).toContain('food-log-v1-5');
+  expect(body).toContain('food-log-v1-6');
   expect(body).toContain('./dist/app.js');
   expect(body).toContain('./manifest.webmanifest');
+});
+
+// ─── v1.6 weight surface ────────────────────────────────────────────────────
+
+test('home screen shows the ⚖ Weight sibling button next to ➕ Meal', async ({ page }) => {
+  await expect(page.locator('#add-meal-btn')).toBeVisible();
+  await expect(page.locator('#add-weight-btn')).toBeVisible();
+  // They sit in the same .quick-actions container.
+  const siblings = page.locator('.quick-actions .quick-action');
+  await expect(siblings).toHaveCount(2);
+});
+
+test('Weight button opens the weight sheet with chip row + kg input + notes', async ({ page }) => {
+  await page.locator('#add-weight-btn').click();
+  await expect(page.locator('.sheet-panel')).toBeVisible();
+  for (const id of ['now', 'morning', 'midday', 'afternoon', 'evening', 'late', 'custom']) {
+    await expect(page.locator(`#weight-chip-${id}`)).toBeVisible();
+  }
+  await expect(page.locator('#weight-chip-now')).toHaveClass(/chip-selected/);
+  await expect(page.locator('#sheet-weight-input')).toBeVisible();
+  await expect(page.locator('#sheet-weight-notes')).toBeVisible();
+});
+
+test('Weight save is disabled when empty, enabled with a valid decimal', async ({ page }) => {
+  await page.locator('#add-weight-btn').click();
+  const save = page.locator('#sheet-weight-save');
+  await expect(save).toBeDisabled();
+  await page.locator('#sheet-weight-input').fill('64.3');
+  await expect(save).toBeEnabled();
+});
+
+test('Weight save is disabled when input is invalid (zero / out of range)', async ({ page }) => {
+  await page.locator('#add-weight-btn').click();
+  const save = page.locator('#sheet-weight-save');
+  // Zero — not allowed (parse bound > 0).
+  await page.locator('#sheet-weight-input').fill('0');
+  await expect(save).toBeDisabled();
+  // Wildly out of range.
+  await page.locator('#sheet-weight-input').fill('999');
+  await expect(save).toBeDisabled();
+  // Valid.
+  await page.locator('#sheet-weight-input').fill('64.3');
+  await expect(save).toBeEnabled();
+});
+
+test('saving a weight shows it in the Weight section on home', async ({ page }) => {
+  await page.locator('#add-weight-btn').click();
+  await page.locator('#sheet-weight-input').fill('64.3');
+  await page.locator('#sheet-weight-save').click();
+  // Sheet closes, row appears.
+  await expect(page.locator('.sheet-panel')).toHaveCount(0);
+  const firstRow = page.locator('.weight-list .weight-row').first();
+  await expect(firstRow).toBeVisible({ timeout: 5000 });
+  await expect(firstRow.locator('.weight-row-kg')).toHaveText('64.3 kg');
+  await expect(page.locator('.toast')).toContainText(/saved/);
+});
+
+test('next weight entry pre-fills with the last saved value', async ({ page }) => {
+  // First entry.
+  await page.locator('#add-weight-btn').click();
+  await page.locator('#sheet-weight-input').fill('64.3');
+  await page.locator('#sheet-weight-save').click();
+  await expect(page.locator('.weight-list .weight-row').first()).toBeVisible({ timeout: 5000 });
+
+  // Second open — input pre-filled with the prior value.
+  await page.locator('#add-weight-btn').click();
+  await expect(page.locator('#sheet-weight-input')).toHaveValue('64.3');
+});
+
+test('weight notes save and surface on the card', async ({ page }) => {
+  await page.locator('#add-weight-btn').click();
+  await page.locator('#sheet-weight-input').fill('64.0');
+  await page.locator('#sheet-weight-notes').fill('post-workout, dehydrated');
+  await page.locator('#sheet-weight-save').click();
+  const firstRow = page.locator('.weight-list .weight-row').first();
+  await expect(firstRow).toBeVisible({ timeout: 5000 });
+  await expect(firstRow.locator('.weight-row-notes')).toContainText('post-workout');
+});
+
+test('Weight section shows an empty-state hint when no entries exist', async ({ page }) => {
+  await expect(page.locator('.weight-section .today-empty')).toContainText(/No weight entries/i);
 });
