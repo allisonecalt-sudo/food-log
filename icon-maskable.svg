@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Food Log">
+  <!-- Maskable: full-bleed background, mark within the ~80% safe zone -->
+  <rect width="512" height="512" fill="#fff4e6"/>
+  <g transform="translate(256 256) scale(0.7) translate(-256 -256)">
+    <rect x="72" y="160" width="368" height="240" rx="36" fill="#e8825c"/>
+    <rect x="200" y="124" width="112" height="48" rx="14" fill="#d06b48"/>
+    <circle cx="256" cy="288" r="92" fill="#3a2e1f"/>
+    <circle cx="256" cy="288" r="68" fill="#7a6852"/>
+    <circle cx="232" cy="264" r="22" fill="#fff4e6" opacity="0.85"/>
+    <circle cx="392" cy="200" r="10" fill="#fff4e6"/>
+  </g>
+</svg>

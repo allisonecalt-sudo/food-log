@@ -1,0 +1,26 @@
+{
+  "name": "food-log",
+  "version": "0.1.0",
+  "description": "Allison's photo-based food log — tap camera, snap meal, save photo + timestamp. v1 = photos + times only; AI vision analysis layered later as data accumulates.",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "lint": "eslint app.ts --ext .ts",
+    "format": "prettier --write \"**/*.{ts,html,css,json,md}\" --ignore-path .prettierignore",
+    "format:check": "prettier --check \"**/*.{ts,html,css,json,md}\" --ignore-path .prettierignore",
+    "test": "playwright test",
+    "test:ci": "playwright test",
+    "serve": "serve -l 3000 .",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "eslint": "^8.57.0",
+    "husky": "^9.1.0",
+    "prettier": "^3.3.0",
+    "serve": "^14.2.0",
+    "typescript": "^5.6.0"
+  }
+}

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Food Log">
+  <rect width="512" height="512" rx="96" fill="#fff4e6"/>
+  <!-- Camera body, warm peach (matches --accent) -->
+  <g fill="#e8825c">
+    <rect x="72" y="160" width="368" height="240" rx="36"/>
+  </g>
+  <!-- Top mount / viewfinder bump -->
+  <rect x="200" y="124" width="112" height="48" rx="14" fill="#d06b48"/>
+  <!-- Lens outer ring -->
+  <circle cx="256" cy="288" r="92" fill="#3a2e1f"/>
+  <!-- Lens inner ring -->
+  <circle cx="256" cy="288" r="68" fill="#7a6852"/>
+  <!-- Lens glass highlight -->
+  <circle cx="232" cy="264" r="22" fill="#fff4e6" opacity="0.85"/>
+  <!-- Shutter dot on top-right -->
+  <circle cx="392" cy="200" r="10" fill="#fff4e6"/>
+</svg>
