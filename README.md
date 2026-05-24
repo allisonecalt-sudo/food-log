@@ -1,27 +1,38 @@
 # Food Log
 
-Allison's photo-based food log — phone PWA, third in the personal-app family
-(budget-2026, workout-tracker, food-log).
+Allison's food log — phone PWA, third in the personal-app family (budget-2026,
+workout-tracker, food-log).
 
-## What this is
+## What this is — v1.5
 
-v1 scope (her words): _"everything that day for now, food and time, that's it.
-As we gain data we can improve."_
+Her words (May 2026): _"I wanted to be able to either take a picture or describe
+what I ate 'cause like let's say I just ate and I didn't take a picture so I
+wanna be able to describe it and also I wanna be able to put in multiple pictures
+per meal and write or voice to text whatever."_
 
-- One screen. Tap the camera button → snap a meal → photo + auto-timestamp
-  saves to Supabase Storage.
-- Today's strip shows every photo from today with `HH:mm` time labels.
+- One screen. Tap **➕ Add a meal** → modal sheet → time + textarea + photos →
+  save.
+- A meal can have 0+ photos AND/OR a written/voice-to-text description (at
+  least one is required to save).
+- Multiple photos per meal — tap **📷 Add photo** as many times as you want;
+  reorder with ↑/↓; remove with ✕.
+- Voice-to-text just works — tap the mic button on the iOS/Android keyboard
+  inside the textarea.
+- Time auto-stamps to "now" but is editable (forgot to log earlier? change it).
+- Today's strip shows every meal from today with time, photo strip, and a
+  description preview.
 - History below collapses prior days (Yesterday, weekday, then dated), last 30
   on the home screen.
-- Tap a thumbnail = full-screen view + hold-to-delete.
-- Offline-safe: failed uploads queue in IndexedDB and drain on next online tick.
+- Tap a meal → full-screen detail (all photos, full description, edit, hold-to-
+  delete).
+- Offline-safe: failed saves queue the entire meal (description + photos) as
+  one unit in IndexedDB and drain on next online tick.
 
 ## What this isn't (yet)
 
-No macros, no protein/leucine tracking, no AI vision analysis, no typing. Those
-layer in v2 once there's enough data to be useful. The `notes` column on
-`food_entries` and the structured `{yyyy}/{mm}/{uuid}.jpg` photo path are the
-v2-ready hooks.
+No macros, no protein/leucine tracking, no AI vision analysis. Those layer in
+v2 once there's enough data to be useful. The `meals.description` column +
+structured `{yyyy}/{mm}/{uuid}.jpg` photo path are the v2-ready hooks.
 
 ## Live
 
@@ -40,7 +51,9 @@ https://allisonecalt-sudo.github.io/food-log/
 ## Supabase
 
 - Project: `hpiyvnfhoqnnnotrmwaz` (shared with budget-2026 + workout-tracker).
-- Table: `food_entries` (id, eaten_at, photo_path, notes, created_at).
+- Tables: `meals` (id, eaten_at, description, created_at) +
+  `meal_photos` (id, meal_id, photo_path, position, created_at), 1:N with
+  `ON DELETE CASCADE`.
 - Storage bucket: `food-photos` (public, RLS allows anon read + write —
   single-user app pattern).
 - See `setup.sql` for the schema + RLS policies.
