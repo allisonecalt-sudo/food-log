@@ -297,10 +297,11 @@ test('add-meal button opens the meal-entry sheet with chip-row + textarea + add-
   await expect(page.locator('#sheet-custom-row')).not.toHaveClass(/visible/);
   await expect(page.locator('#sheet-desc')).toBeVisible();
   await expect(page.locator('#sheet-add-photo')).toBeVisible();
-  // The hidden photo input pre-selects rear camera on phones.
+  // v1.7.1 — photo input accepts gallery (no `capture`) + multi-select.
   const photoInput = page.locator('#sheet-photo-input');
   await expect(photoInput).toHaveAttribute('accept', 'image/*');
-  await expect(photoInput).toHaveAttribute('capture', 'environment');
+  await expect(photoInput).toHaveAttribute('multiple', 'true');
+  await expect(photoInput).not.toHaveAttribute('capture', 'environment');
 });
 
 test('tapping a chip selects it, tapping Custom expands the date+time inputs', async ({ page }) => {
@@ -577,7 +578,7 @@ test('service worker file is served at /sw.js and references our shell assets', 
   const res = await page.request.get('/sw.js');
   expect(res.ok()).toBeTruthy();
   const body = await res.text();
-  expect(body).toContain('food-log-v1-6');
+  expect(body).toContain('food-log-v1-7');
   expect(body).toContain('./dist/app.js');
   expect(body).toContain('./manifest.webmanifest');
 });

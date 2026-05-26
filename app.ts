@@ -2437,17 +2437,25 @@ function buildSheet(s: SheetState): HTMLElement {
     },
     [el('span', { 'aria-hidden': 'true' }, ['📷']), ' Add photo']
   );
+  // v1.7.1 — gallery + multi-select. Per Allison 2026-05-26 4:15pm:
+  // "I don't really want to update from taking a photo I want to be able to
+  // put an actual photo or multiple photos at once." `capture=environment`
+  // was forcing camera on mobile; removing it lets the OS show its native
+  // picker (camera OR gallery). `multiple` enables multi-select.
   const photoInput = el('input', {
     type: 'file',
     accept: 'image/*',
-    capture: 'environment',
+    multiple: 'true',
     class: 'camera-input-hidden',
     id: 'sheet-photo-input',
   }) as HTMLInputElement;
   addPhotoBtn.addEventListener('click', () => photoInput.click());
   photoInput.addEventListener('change', () => {
-    const file = photoInput.files && photoInput.files[0];
-    if (file) addDraftPhoto(file);
+    if (photoInput.files) {
+      for (let i = 0; i < photoInput.files.length; i++) {
+        addDraftPhoto(photoInput.files[i]);
+      }
+    }
     photoInput.value = '';
   });
   photosWrap.appendChild(addPhotoBtn);
