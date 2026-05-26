@@ -587,9 +587,10 @@ test('service worker file is served at /sw.js and references our shell assets', 
 test('home screen shows the ⚖ Weight sibling button next to ➕ Meal', async ({ page }) => {
   await expect(page.locator('#add-meal-btn')).toBeVisible();
   await expect(page.locator('#add-weight-btn')).toBeVisible();
+  await expect(page.locator('#add-cook-btn')).toBeVisible(); // v1.7
   // They sit in the same .quick-actions container.
   const siblings = page.locator('.quick-actions .quick-action');
-  await expect(siblings).toHaveCount(2);
+  await expect(siblings).toHaveCount(3); // v1.7: Meal + Cooked + Weight
 });
 
 test('Weight button opens the weight sheet with chip row + kg input + notes', async ({ page }) => {
@@ -617,8 +618,9 @@ test('Weight save is disabled when input is invalid (zero / out of range)', asyn
   // Zero — not allowed (parse bound > 0).
   await page.locator('#sheet-weight-input').fill('0');
   await expect(save).toBeDisabled();
+  // v1.7: range expanded to <=1000 to allow lb entries (200lb fine, but 999lb is too).
   // Wildly out of range.
-  await page.locator('#sheet-weight-input').fill('999');
+  await page.locator('#sheet-weight-input').fill('9999');
   await expect(save).toBeDisabled();
   // Valid.
   await page.locator('#sheet-weight-input').fill('64.3');

@@ -48,11 +48,15 @@ const BUCKET = 'food-photos';
 const MEALS_TABLE = 'meals';
 const PHOTOS_TABLE = 'meal_photos';
 const WEIGHT_TABLE = 'weight_log';
+const COOKS_TABLE = 'cook_sessions';
 const HISTORY_DAYS = 30;
+const COOK_LOOKBACK_DAYS = 14; // cook sessions older than this are dropped from the runway strip
 const WEIGHT_PREVIEW_COUNT = 5; // last N weights shown collapsed on home
+const LB_PER_KG = 2.20462;
 const IDB_NAME = 'food-log-queue';
 const IDB_STORE_MEALS = 'pending-meals';
 const IDB_STORE_WEIGHTS = 'pending-weights'; // v1.6 add
+const IDB_STORE_COOKS = 'pending-cooks'; // v1.7 add
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -68,7 +72,29 @@ interface Meal {
   eaten_at: string; // ISO timestamp
   description: string | null;
   photos: MealPhoto[];
+  cook_session_id: string | null; // v1.7 — links to a cook batch
+  portions_consumed: number | null; // v1.7 — null means "didn't track portions"
   pending: boolean; // true if still queued locally
+}
+
+// v1.7 — cook session = one cooking event that yields N portions consumed
+// across multiple meals. Decoupling cook from eat lets the app answer
+// "how many portions left and when should I cook again."
+interface CookSession {
+  id: string;
+  cooked_at: string;
+  description: string | null;
+  total_portions: number | null; // estimated yield; nullable for "I don't know"
+  notes: string | null;
+  pending: boolean;
+}
+
+interface PendingCook {
+  localId: string;
+  cooked_at: string;
+  description: string | null;
+  total_portions: number | null;
+  notes: string | null;
 }
 
 interface PendingPhotoBlob {
@@ -86,10 +112,15 @@ interface PendingMeal {
   photos: PendingPhotoBlob[];
 }
 
+// v1.7 — weight_kg is canonical kg (always). `unit` is the unit she ENTERED
+// in, so display + edit can round-trip her preference (lb users get lb back).
+type WeightUnit = 'kg' | 'lb';
+
 interface WeightEntry {
   id: string;
   measured_at: string;
   weight_kg: number;
+  unit: WeightUnit;
   notes: string | null;
   pending: boolean;
 }
@@ -98,6 +129,7 @@ interface PendingWeight {
   localId: string;
   measured_at: string;
   weight_kg: number;
+  unit: WeightUnit;
   notes: string | null;
 }
 
@@ -115,17 +147,29 @@ interface DraftPhoto {
 // One-tap chips that cover the 95% case ("eaten this morning" / "afternoon").
 // Custom expands the date+time inputs underneath for precision when she wants
 // it (the rare 5%).
-type ChipId = 'now' | 'morning' | 'midday' | 'afternoon' | 'evening' | 'late' | 'custom';
+type ChipId =
+  | 'now'
+  | 'morning'
+  | 'midday'
+  | 'afternoon'
+  | 'evening'
+  | 'late'
+  | 'yesterday'
+  | 'custom';
 
 interface ChipDef {
   id: ChipId;
   label: string;
-  // For chips other than 'now' and 'custom', the hour they snap to today
-  // (local wall-clock). 'now' resolves at tap-time, 'custom' is user-driven.
+  // For chips other than 'now', 'yesterday', and 'custom': hour they snap to
+  // (local wall-clock today). 'now' resolves at tap-time, 'yesterday' resolves
+  // to (now - 24h), 'custom' is user-driven.
   hour?: number;
   minute?: number;
 }
 
+// v1.7 — Yesterday chip added between Late and Custom. Backfill for "I forgot
+// to log yesterday's meal" without forcing the date picker. Resolves to
+// (now - 24h) so the wall-clock hour matches her current intuition.
 const CHIP_DEFS: readonly ChipDef[] = [
   { id: 'now', label: 'Now' },
   { id: 'morning', label: 'Morning', hour: 9, minute: 0 },
@@ -133,6 +177,7 @@ const CHIP_DEFS: readonly ChipDef[] = [
   { id: 'afternoon', label: 'Afternoon', hour: 15, minute: 0 },
   { id: 'evening', label: 'Evening', hour: 19, minute: 0 },
   { id: 'late', label: 'Late', hour: 22, minute: 0 },
+  { id: 'yesterday', label: 'Yesterday' },
   { id: 'custom', label: 'Custom' },
 ];
 
@@ -141,7 +186,8 @@ const CHIP_DEFS: readonly ChipDef[] = [
 // Morning chip; if it's a wildly off-hours time, fall back to Custom.
 //
 // Match window: ±90 minutes from the chip's anchor hour AND the date is today.
-// Off-today entries always fall to Custom (no chip means "today at X").
+// Yesterday (same wall-clock hour, day = today - 1) falls to Custom on edit so
+// the date is visible in the picker — Yesterday chip is a save-time convenience.
 function chipForIso(iso: string): ChipId {
   const d = new Date(iso);
   const today = new Date();
@@ -154,7 +200,8 @@ function chipForIso(iso: string): ChipId {
   }
   const totalMin = d.getHours() * 60 + d.getMinutes();
   for (const c of CHIP_DEFS) {
-    if (c.id === 'now' || c.id === 'custom' || c.hour === undefined) continue;
+    if (c.id === 'now' || c.id === 'custom' || c.id === 'yesterday' || c.hour === undefined)
+      continue;
     const anchor = c.hour * 60 + (c.minute ?? 0);
     if (Math.abs(totalMin - anchor) <= 90) return c.id;
   }
@@ -168,6 +215,13 @@ function isoForChip(c: ChipId): string {
     return new Date().toISOString();
   }
   if (c === 'now') return new Date().toISOString();
+  if (c === 'yesterday') {
+    // Same wall-clock hour as right now, but 24h ago. Covers "I forgot to log
+    // yesterday's dinner" — if it's 12pm now, she likely means yesterday 12pm.
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    return d.toISOString();
+  }
   const def = CHIP_DEFS.find((d) => d.id === c);
   const d = new Date();
   if (def && def.hour !== undefined) {
@@ -187,6 +241,10 @@ interface SheetState {
   chip: ChipId; // active fuzzy-time chip
   eatenAtLocal: string; // value of <input type=datetime-local> under Custom
   description: string;
+  // v1.7 — optional link to a cook session this meal came from + portions
+  // estimate. Null = "didn't track" (90% case stays one tap).
+  cookSessionId: string | null;
+  portionsConsumed: string; // raw string so blank/invalid is representable
   // For an edit, existing photos already on the server that the user hasn't
   // removed. Removed ones go to removedExistingIds.
   existingPhotos: MealPhoto[];
@@ -198,7 +256,20 @@ interface WeightSheetState {
   weightId: string | null; // null = new entry; otherwise editing
   chip: ChipId;
   measuredAtLocal: string;
-  weightKg: string; // raw string so blank/invalid is representable
+  // Raw string so blank/invalid is representable. Value is in `unit`'s scale —
+  // converted to kg only at save-time.
+  weightValue: string;
+  unit: WeightUnit;
+  notes: string;
+}
+
+// v1.7 — cook session sheet (parallel structure to weight sheet).
+interface CookSheetState {
+  cookId: string | null;
+  chip: ChipId;
+  cookedAtLocal: string;
+  description: string;
+  totalPortions: string; // optional — blank = "I don't know yet"
   notes: string;
 }
 
@@ -246,11 +317,17 @@ function uuid(): string {
 
 let meals: Meal[] = [];
 let weights: WeightEntry[] = [];
+let cooks: CookSession[] = [];
 let lightboxMeal: Meal | null = null;
 let weightLightbox: WeightEntry | null = null;
+let cookLightbox: CookSession | null = null;
 let sheet: SheetState | null = null;
 let weightSheet: WeightSheetState | null = null;
+let cookSheet: CookSheetState | null = null;
 let weightHistoryOpen = false;
+// Last-used display unit for weight. New entries default to this. Initialized
+// to whatever the most-recent row used; falls back to 'kg' on empty history.
+let weightDisplayUnit: WeightUnit = 'kg';
 
 // ─── Supabase URLs ──────────────────────────────────────────────────────────
 
@@ -324,12 +401,27 @@ function previewDescription(text: string): string {
   return trimmed.slice(0, 77) + '…';
 }
 
+// ─── Weight unit helpers (v1.7) ─────────────────────────────────────────────
+
+function kgToUnit(kg: number, unit: WeightUnit): number {
+  return unit === 'lb' ? kg * LB_PER_KG : kg;
+}
+
+function unitToKg(value: number, unit: WeightUnit): number {
+  return unit === 'lb' ? value / LB_PER_KG : value;
+}
+
+function formatWeight(kg: number, unit: WeightUnit): string {
+  const value = kgToUnit(kg, unit);
+  return `${value.toFixed(1)} ${unit}`;
+}
+
 // ─── IndexedDB offline queue ────────────────────────────────────────────────
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    // v3: adds pending-weights store.
-    const req = indexedDB.open(IDB_NAME, 3);
+    // v4: adds pending-cooks store.
+    const req = indexedDB.open(IDB_NAME, 4);
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(IDB_STORE_MEALS)) {
@@ -337,6 +429,9 @@ function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(IDB_STORE_WEIGHTS)) {
         db.createObjectStore(IDB_STORE_WEIGHTS, { keyPath: 'localId' });
+      }
+      if (!db.objectStoreNames.contains(IDB_STORE_COOKS)) {
+        db.createObjectStore(IDB_STORE_COOKS, { keyPath: 'localId' });
       }
       // Best-effort: nuke v1 store so its photo-only entries don't linger.
       if (db.objectStoreNames.contains('pending')) {
@@ -416,6 +511,40 @@ async function removePendingWeight(localId: string): Promise<void> {
   db.close();
 }
 
+async function queuePendingCook(item: PendingCook): Promise<void> {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE_COOKS, 'readwrite');
+    tx.objectStore(IDB_STORE_COOKS).put(item);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+
+async function readPendingCooks(): Promise<PendingCook[]> {
+  const db = await openDb();
+  const result = await new Promise<PendingCook[]>((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE_COOKS, 'readonly');
+    const req = tx.objectStore(IDB_STORE_COOKS).getAll();
+    req.onsuccess = () => resolve(req.result as PendingCook[]);
+    req.onerror = () => reject(req.error);
+  });
+  db.close();
+  return result;
+}
+
+async function removePendingCook(localId: string): Promise<void> {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE_COOKS, 'readwrite');
+    tx.objectStore(IDB_STORE_COOKS).delete(localId);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+
 // ─── Supabase API ───────────────────────────────────────────────────────────
 
 async function uploadPhoto(blob: Blob, path: string): Promise<void> {
@@ -451,6 +580,8 @@ interface MealRow {
   id: string;
   eaten_at: string;
   description: string | null;
+  cook_session_id: string | null;
+  portions_consumed: number | string | null;
 }
 
 interface MealPhotoRow {
@@ -464,10 +595,31 @@ interface WeightRow {
   id: string;
   measured_at: string;
   weight_kg: number | string; // PostgREST returns numeric as string sometimes
+  unit: WeightUnit | null; // null if migrated row pre-default; default 'kg'
   notes: string | null;
 }
 
-async function insertMealRow(eatenAt: string, description: string | null): Promise<MealRow> {
+interface CookRow {
+  id: string;
+  cooked_at: string;
+  description: string | null;
+  total_portions: number | string | null;
+  notes: string | null;
+}
+
+function rowNumOrNull(v: number | string | null | undefined): number | null {
+  if (v === null || v === undefined || v === '') return null;
+  if (typeof v === 'number') return isFinite(v) ? v : null;
+  const n = parseFloat(v);
+  return isFinite(n) ? n : null;
+}
+
+async function insertMealRow(
+  eatenAt: string,
+  description: string | null,
+  cookSessionId: string | null,
+  portionsConsumed: number | null
+): Promise<MealRow> {
   const res = await fetch(`${SB_URL}/rest/v1/${MEALS_TABLE}`, {
     method: 'POST',
     headers: {
@@ -476,7 +628,12 @@ async function insertMealRow(eatenAt: string, description: string | null): Promi
       'Content-Type': 'application/json',
       Prefer: 'return=representation',
     },
-    body: JSON.stringify({ eaten_at: eatenAt, description }),
+    body: JSON.stringify({
+      eaten_at: eatenAt,
+      description,
+      cook_session_id: cookSessionId,
+      portions_consumed: portionsConsumed,
+    }),
   });
   if (!res.ok) {
     const text = await res.text();
@@ -489,7 +646,9 @@ async function insertMealRow(eatenAt: string, description: string | null): Promi
 async function patchMealRow(
   mealId: string,
   eatenAt: string,
-  description: string | null
+  description: string | null,
+  cookSessionId: string | null,
+  portionsConsumed: number | null
 ): Promise<void> {
   const res = await fetch(`${SB_URL}/rest/v1/${MEALS_TABLE}?id=eq.${encodeURIComponent(mealId)}`, {
     method: 'PATCH',
@@ -498,7 +657,12 @@ async function patchMealRow(
       Authorization: `Bearer ${SB_KEY}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ eaten_at: eatenAt, description }),
+    body: JSON.stringify({
+      eaten_at: eatenAt,
+      description,
+      cook_session_id: cookSessionId,
+      portions_consumed: portionsConsumed,
+    }),
   });
   if (!res.ok) {
     const text = await res.text();
@@ -558,6 +722,7 @@ async function deleteMealRow(mealId: string): Promise<void> {
 async function insertWeightRow(
   measuredAt: string,
   weightKg: number,
+  unit: WeightUnit,
   notes: string | null
 ): Promise<WeightRow> {
   const res = await fetch(`${SB_URL}/rest/v1/${WEIGHT_TABLE}`, {
@@ -568,7 +733,7 @@ async function insertWeightRow(
       'Content-Type': 'application/json',
       Prefer: 'return=representation',
     },
-    body: JSON.stringify({ measured_at: measuredAt, weight_kg: weightKg, notes }),
+    body: JSON.stringify({ measured_at: measuredAt, weight_kg: weightKg, unit, notes }),
   });
   if (!res.ok) {
     const text = await res.text();
@@ -582,6 +747,7 @@ async function patchWeightRow(
   weightId: string,
   measuredAt: string,
   weightKg: number,
+  unit: WeightUnit,
   notes: string | null
 ): Promise<void> {
   const res = await fetch(
@@ -593,7 +759,7 @@ async function patchWeightRow(
         Authorization: `Bearer ${SB_KEY}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ measured_at: measuredAt, weight_kg: weightKg, notes }),
+      body: JSON.stringify({ measured_at: measuredAt, weight_kg: weightKg, unit, notes }),
     }
   );
   if (!res.ok) {
@@ -616,6 +782,104 @@ async function deleteWeightRow(weightId: string): Promise<void> {
   }
 }
 
+// ─── Cook session API (v1.7) ────────────────────────────────────────────────
+
+async function insertCookRow(
+  cookedAt: string,
+  description: string | null,
+  totalPortions: number | null,
+  notes: string | null
+): Promise<CookRow> {
+  const res = await fetch(`${SB_URL}/rest/v1/${COOKS_TABLE}`, {
+    method: 'POST',
+    headers: {
+      apikey: SB_KEY,
+      Authorization: `Bearer ${SB_KEY}`,
+      'Content-Type': 'application/json',
+      Prefer: 'return=representation',
+    },
+    body: JSON.stringify({
+      cooked_at: cookedAt,
+      description,
+      total_portions: totalPortions,
+      notes,
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`cook insert failed (${res.status}): ${text}`);
+  }
+  const rows = (await res.json()) as CookRow[];
+  return rows[0];
+}
+
+async function patchCookRow(
+  cookId: string,
+  cookedAt: string,
+  description: string | null,
+  totalPortions: number | null,
+  notes: string | null
+): Promise<void> {
+  const res = await fetch(`${SB_URL}/rest/v1/${COOKS_TABLE}?id=eq.${encodeURIComponent(cookId)}`, {
+    method: 'PATCH',
+    headers: {
+      apikey: SB_KEY,
+      Authorization: `Bearer ${SB_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      cooked_at: cookedAt,
+      description,
+      total_portions: totalPortions,
+      notes,
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`cook patch failed (${res.status}): ${text}`);
+  }
+}
+
+async function deleteCookRow(cookId: string): Promise<void> {
+  // ON DELETE SET NULL on meals.cook_session_id — orphaned meals lose link
+  // but are not deleted (her meal records are precious).
+  const res = await fetch(`${SB_URL}/rest/v1/${COOKS_TABLE}?id=eq.${encodeURIComponent(cookId)}`, {
+    method: 'DELETE',
+    headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`cook delete failed (${res.status}): ${text}`);
+  }
+}
+
+async function fetchCooks(): Promise<CookSession[]> {
+  const since = new Date();
+  since.setDate(since.getDate() - COOK_LOOKBACK_DAYS);
+  since.setHours(0, 0, 0, 0);
+  const url =
+    `${SB_URL}/rest/v1/${COOKS_TABLE}` +
+    `?select=id,cooked_at,description,total_portions,notes` +
+    `&cooked_at=gte.${encodeURIComponent(since.toISOString())}` +
+    `&order=cooked_at.desc`;
+  const res = await fetch(url, {
+    headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`cooks fetch failed (${res.status}): ${text}`);
+  }
+  const rows = (await res.json()) as CookRow[];
+  return rows.map((r) => ({
+    id: r.id,
+    cooked_at: r.cooked_at,
+    description: r.description,
+    total_portions: rowNumOrNull(r.total_portions),
+    notes: r.notes,
+    pending: false,
+  }));
+}
+
 async function fetchMeals(): Promise<Meal[]> {
   const since = new Date();
   since.setDate(since.getDate() - HISTORY_DAYS);
@@ -623,7 +887,7 @@ async function fetchMeals(): Promise<Meal[]> {
 
   const mealsUrl =
     `${SB_URL}/rest/v1/${MEALS_TABLE}` +
-    `?select=id,eaten_at,description` +
+    `?select=id,eaten_at,description,cook_session_id,portions_consumed` +
     `&eaten_at=gte.${encodeURIComponent(since.toISOString())}` +
     `&order=eaten_at.desc`;
   const mealsRes = await fetch(mealsUrl, {
@@ -668,6 +932,8 @@ async function fetchMeals(): Promise<Meal[]> {
     eaten_at: m.eaten_at,
     description: m.description,
     photos: (photosByMeal.get(m.id) ?? []).sort((a, b) => a.position - b.position),
+    cook_session_id: m.cook_session_id,
+    portions_consumed: rowNumOrNull(m.portions_consumed),
     pending: false,
   }));
 }
@@ -676,7 +942,7 @@ async function fetchWeights(): Promise<WeightEntry[]> {
   // Pull more than the preview count so the expanded history view is also populated.
   const url =
     `${SB_URL}/rest/v1/${WEIGHT_TABLE}` +
-    `?select=id,measured_at,weight_kg,notes` +
+    `?select=id,measured_at,weight_kg,unit,notes` +
     `&order=measured_at.desc&limit=200`;
   const res = await fetch(url, {
     headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` },
@@ -690,6 +956,7 @@ async function fetchWeights(): Promise<WeightEntry[]> {
     id: r.id,
     measured_at: r.measured_at,
     weight_kg: typeof r.weight_kg === 'string' ? parseFloat(r.weight_kg) : r.weight_kg,
+    unit: r.unit ?? 'kg',
     notes: r.notes,
     pending: false,
   }));
@@ -718,9 +985,11 @@ function toast(msg: string, ms = 1800): void {
 async function saveNewMealOnline(
   eatenAt: string,
   description: string | null,
+  cookSessionId: string | null,
+  portionsConsumed: number | null,
   draftPhotos: DraftPhoto[]
 ): Promise<Meal> {
-  const mealRow = await insertMealRow(eatenAt, description);
+  const mealRow = await insertMealRow(eatenAt, description, cookSessionId, portionsConsumed);
   const photos: MealPhoto[] = [];
   for (let i = 0; i < draftPhotos.length; i++) {
     const dp = draftPhotos[i];
@@ -738,6 +1007,8 @@ async function saveNewMealOnline(
     eaten_at: mealRow.eaten_at,
     description: mealRow.description,
     photos,
+    cook_session_id: mealRow.cook_session_id,
+    portions_consumed: rowNumOrNull(mealRow.portions_consumed),
     pending: false,
   };
 }
@@ -748,11 +1019,13 @@ async function saveEditedMealOnline(
   mealId: string,
   eatenAt: string,
   description: string | null,
+  cookSessionId: string | null,
+  portionsConsumed: number | null,
   keptPhotos: MealPhoto[],
   removedPhotos: MealPhoto[],
   draftPhotos: DraftPhoto[]
 ): Promise<Meal> {
-  await patchMealRow(mealId, eatenAt, description);
+  await patchMealRow(mealId, eatenAt, description, cookSessionId, portionsConsumed);
   for (const p of removedPhotos) {
     await deleteMealPhotoRow(p.id);
     void deleteStorageObject(p.photo_path);
@@ -775,6 +1048,8 @@ async function saveEditedMealOnline(
     eaten_at: eatenAt,
     description,
     photos: [...keptPhotos, ...newPhotos].sort((a, b) => a.position - b.position),
+    cook_session_id: cookSessionId,
+    portions_consumed: portionsConsumed,
     pending: false,
   };
 }
@@ -794,11 +1069,49 @@ async function drainQueue(): Promise<void> {
   if (draining) return;
   draining = true;
   try {
-    // Meals first.
+    // Cooks first — a meal queued with cookSessionId pointing at a pending
+    // local cook would 404 if drained before its cook. So we drain cooks first
+    // and rewrite the meal queue's cook_session_id to the real id post-promote.
+    const pendingCooks = await readPendingCooks();
+    const cookLocalToReal = new Map<string, string>();
+    for (const item of pendingCooks) {
+      try {
+        const row = await insertCookRow(
+          item.cooked_at,
+          item.description,
+          item.total_portions,
+          item.notes
+        );
+        await removePendingCook(item.localId);
+        cookLocalToReal.set(item.localId, row.id);
+        cooks = cooks.filter((c) => c.id !== item.localId);
+        cooks.unshift({
+          id: row.id,
+          cooked_at: row.cooked_at,
+          description: row.description,
+          total_portions: rowNumOrNull(row.total_portions),
+          notes: row.notes,
+          pending: false,
+        });
+      } catch (err) {
+        console.warn('[food-log] cook queue drain failed (will retry):', err);
+        break;
+      }
+    }
+    sortCooks();
+
+    // Then meals.
     const pendingMeals = await readPendingMeals();
     for (const item of pendingMeals) {
       try {
-        const mealRow = await insertMealRow(item.eaten_at, item.description);
+        // Rewrite local cook id to real id if it was just promoted.
+        let cookId: string | null = null;
+        const linkedMeal = meals.find((m) => m.id === item.localId);
+        if (linkedMeal && linkedMeal.cook_session_id) {
+          cookId = cookLocalToReal.get(linkedMeal.cook_session_id) ?? linkedMeal.cook_session_id;
+        }
+        const portions = linkedMeal ? linkedMeal.portions_consumed : null;
+        const mealRow = await insertMealRow(item.eaten_at, item.description, cookId, portions);
         const photos: MealPhoto[] = [];
         for (const p of item.photos) {
           await uploadPhoto(p.blob, p.photo_path);
@@ -817,6 +1130,8 @@ async function drainQueue(): Promise<void> {
           eaten_at: mealRow.eaten_at,
           description: mealRow.description,
           photos,
+          cook_session_id: mealRow.cook_session_id,
+          portions_consumed: rowNumOrNull(mealRow.portions_consumed),
           pending: false,
         });
       } catch (err) {
@@ -830,13 +1145,14 @@ async function drainQueue(): Promise<void> {
     const pendingWeights = await readPendingWeights();
     for (const item of pendingWeights) {
       try {
-        const row = await insertWeightRow(item.measured_at, item.weight_kg, item.notes);
+        const row = await insertWeightRow(item.measured_at, item.weight_kg, item.unit, item.notes);
         await removePendingWeight(item.localId);
         weights = weights.filter((w) => w.id !== item.localId);
         weights.unshift({
           id: row.id,
           measured_at: row.measured_at,
           weight_kg: typeof row.weight_kg === 'string' ? parseFloat(row.weight_kg) : row.weight_kg,
+          unit: row.unit ?? 'kg',
           notes: row.notes,
           pending: false,
         });
@@ -858,11 +1174,13 @@ async function updateQueueBanner(): Promise<void> {
   if (!banner) return;
   const mealCount = (await readPendingMeals().catch(() => [])).length;
   const weightCount = (await readPendingWeights().catch(() => [])).length;
-  const total = mealCount + weightCount;
+  const cookCount = (await readPendingCooks().catch(() => [])).length;
+  const total = mealCount + weightCount + cookCount;
   if (total > 0) {
     const parts: string[] = [];
     if (mealCount > 0) parts.push(`${mealCount} meal${mealCount === 1 ? '' : 's'}`);
     if (weightCount > 0) parts.push(`${weightCount} weight${weightCount === 1 ? '' : 's'}`);
+    if (cookCount > 0) parts.push(`${cookCount} cook${cookCount === 1 ? '' : 's'}`);
     banner.textContent = `${parts.join(' + ')} queued — will upload when online`;
     banner.classList.add('visible');
   } else {
@@ -872,12 +1190,34 @@ async function updateQueueBanner(): Promise<void> {
 
 // ─── Meal-entry sheet ───────────────────────────────────────────────────────
 
+// Helper: open a meal sheet pre-pointed at a specific day. Used by the
+// per-day "+ Add meal" affordance inside the history accordion.
+function openSheetForDay(dayKey: number): void {
+  const d = new Date(dayKey);
+  // Default to 12:00 local on that day — easy to nudge with the time input.
+  d.setHours(12, 0, 0, 0);
+  sheet = {
+    mealId: null,
+    chip: 'custom',
+    eatenAtLocal: isoToDatetimeLocal(d.toISOString()),
+    description: '',
+    cookSessionId: null,
+    portionsConsumed: '',
+    existingPhotos: [],
+    removedExistingIds: new Set(),
+    draftPhotos: [],
+  };
+  render();
+}
+
 function openSheetForNew(): void {
   sheet = {
     mealId: null,
     chip: 'now',
     eatenAtLocal: isoToDatetimeLocal(new Date().toISOString()),
     description: '',
+    cookSessionId: null,
+    portionsConsumed: '',
     existingPhotos: [],
     removedExistingIds: new Set(),
     draftPhotos: [],
@@ -892,6 +1232,8 @@ function openSheetForEdit(m: Meal): void {
     chip,
     eatenAtLocal: isoToDatetimeLocal(m.eaten_at),
     description: m.description ?? '',
+    cookSessionId: m.cook_session_id,
+    portionsConsumed: m.portions_consumed !== null ? m.portions_consumed.toString() : '',
     existingPhotos: [...m.photos],
     removedExistingIds: new Set(),
     draftPhotos: [],
@@ -906,7 +1248,9 @@ function closeSheet(force = false): void {
   const hasContent =
     sheet.description.trim().length > 0 ||
     sheet.draftPhotos.length > 0 ||
-    sheet.removedExistingIds.size > 0;
+    sheet.removedExistingIds.size > 0 ||
+    sheet.cookSessionId !== null ||
+    sheet.portionsConsumed.trim() !== '';
   if (!force && hasContent) {
     if (!window.confirm('Discard this meal?')) return;
   }
@@ -928,6 +1272,16 @@ function resolveEatenAt(s: SheetState): string {
   return isoForChip(s.chip);
 }
 
+// Parse portions text. Empty → null (didn't track). Otherwise must be a sane
+// positive number; rejects "abc", supports decimals like "1.5" or "0.5".
+function parsePortions(raw: string): number | null {
+  const trimmed = raw.trim().replace(',', '.');
+  if (trimmed === '') return null;
+  const n = parseFloat(trimmed);
+  if (!isFinite(n) || isNaN(n) || n <= 0 || n > 50) return null;
+  return n;
+}
+
 async function commitSheet(): Promise<void> {
   if (!sheet) return;
   if (!sheetIsSaveable(sheet)) {
@@ -937,6 +1291,11 @@ async function commitSheet(): Promise<void> {
   const s = sheet;
   const eatenAt = resolveEatenAt(s);
   const description = s.description.trim() === '' ? null : s.description.trim();
+  const cookSessionId = s.cookSessionId;
+  // If linked to a cook session but portions left blank, default to 1.
+  const rawPortions = s.portionsConsumed.trim();
+  const portionsConsumed =
+    cookSessionId !== null && rawPortions === '' ? 1 : parsePortions(rawPortions);
 
   if (s.mealId === null) {
     // NEW meal.
@@ -952,6 +1311,8 @@ async function commitSheet(): Promise<void> {
         photo_url: dp.blobUrl,
         position: i,
       })),
+      cook_session_id: cookSessionId,
+      portions_consumed: portionsConsumed,
       pending: true,
     };
     meals.unshift(optimistic);
@@ -961,7 +1322,13 @@ async function commitSheet(): Promise<void> {
     toast('saving…');
 
     try {
-      const saved = await saveNewMealOnline(eatenAt, description, draftCopy);
+      const saved = await saveNewMealOnline(
+        eatenAt,
+        description,
+        cookSessionId,
+        portionsConsumed,
+        draftCopy
+      );
       meals = meals.filter((m) => m.id !== localId);
       meals.unshift(saved);
       for (const dp of draftCopy) URL.revokeObjectURL(dp.blobUrl);
@@ -1003,6 +1370,8 @@ async function commitSheet(): Promise<void> {
         mealId,
         eatenAt,
         description,
+        cookSessionId,
+        portionsConsumed,
         keptPhotos,
         removedPhotos,
         draftCopy
@@ -1021,18 +1390,22 @@ async function commitSheet(): Promise<void> {
 
 // ─── Weight sheet ───────────────────────────────────────────────────────────
 
-function lastKnownWeightKg(): number | null {
+function lastKnownWeight(): { kg: number; unit: WeightUnit } | null {
   if (weights.length === 0) return null;
-  return weights[0].weight_kg;
+  return { kg: weights[0].weight_kg, unit: weights[0].unit };
 }
 
 function openWeightSheetForNew(): void {
-  const last = lastKnownWeightKg();
+  const last = lastKnownWeight();
+  const unit: WeightUnit = last ? last.unit : weightDisplayUnit;
+  // Pre-fill with last weight in the chosen display unit.
+  const value = last !== null ? kgToUnit(last.kg, unit).toFixed(1) : '';
   weightSheet = {
     weightId: null,
     chip: 'now',
     measuredAtLocal: isoToDatetimeLocal(new Date().toISOString()),
-    weightKg: last !== null ? last.toFixed(1) : '',
+    weightValue: value,
+    unit,
     notes: '',
   };
   render();
@@ -1043,7 +1416,8 @@ function openWeightSheetForEdit(w: WeightEntry): void {
     weightId: w.id,
     chip: chipForIso(w.measured_at),
     measuredAtLocal: isoToDatetimeLocal(w.measured_at),
-    weightKg: w.weight_kg.toString(),
+    weightValue: kgToUnit(w.weight_kg, w.unit).toFixed(1),
+    unit: w.unit,
     notes: w.notes ?? '',
   };
   weightLightbox = null;
@@ -1064,18 +1438,19 @@ function closeWeightSheet(force = false): void {
   render();
 }
 
-function parseWeightKg(raw: string): number | null {
+// Parse value in caller's chosen unit. Bounds check is generous so 200lb is OK.
+function parseWeightValue(raw: string): number | null {
   const trimmed = raw.trim().replace(',', '.');
   if (trimmed === '') return null;
   const n = parseFloat(trimmed);
   if (!isFinite(n) || isNaN(n)) return null;
-  // Reasonable bounds — avoid stray typos like "646" (forgot the dot).
-  if (n <= 0 || n > 500) return null;
+  // Bounds: generous enough to cover both kg (~30-300) and lb (~60-660).
+  if (n <= 0 || n > 1000) return null;
   return n;
 }
 
 function weightSheetIsSaveable(s: WeightSheetState): boolean {
-  return parseWeightKg(s.weightKg) !== null;
+  return parseWeightValue(s.weightValue) !== null;
 }
 
 function resolveMeasuredAt(s: WeightSheetState): string {
@@ -1086,13 +1461,17 @@ function resolveMeasuredAt(s: WeightSheetState): string {
 async function commitWeightSheet(): Promise<void> {
   if (!weightSheet) return;
   if (!weightSheetIsSaveable(weightSheet)) {
-    toast('enter a weight in kg first');
+    toast('enter a weight first');
     return;
   }
   const s = weightSheet;
   const measuredAt = resolveMeasuredAt(s);
-  const weightKg = parseWeightKg(s.weightKg);
-  if (weightKg === null) return;
+  const rawValue = parseWeightValue(s.weightValue);
+  if (rawValue === null) return;
+  const unit = s.unit;
+  // Canonical storage is always kg. Convert from her entered unit.
+  const weightKg = unitToKg(rawValue, unit);
+  weightDisplayUnit = unit; // remember for next new entry
   const notes = s.notes.trim() === '' ? null : s.notes.trim();
 
   if (s.weightId === null) {
@@ -1101,6 +1480,7 @@ async function commitWeightSheet(): Promise<void> {
       id: localId,
       measured_at: measuredAt,
       weight_kg: weightKg,
+      unit,
       notes,
       pending: true,
     };
@@ -1110,12 +1490,13 @@ async function commitWeightSheet(): Promise<void> {
     render();
     toast('saving…');
     try {
-      const row = await insertWeightRow(measuredAt, weightKg, notes);
+      const row = await insertWeightRow(measuredAt, weightKg, unit, notes);
       weights = weights.filter((w) => w.id !== localId);
       weights.unshift({
         id: row.id,
         measured_at: row.measured_at,
         weight_kg: typeof row.weight_kg === 'string' ? parseFloat(row.weight_kg) : row.weight_kg,
+        unit: row.unit ?? unit,
         notes: row.notes,
         pending: false,
       });
@@ -1128,6 +1509,7 @@ async function commitWeightSheet(): Promise<void> {
         localId,
         measured_at: measuredAt,
         weight_kg: weightKg,
+        unit,
         notes,
       });
       toast('saved offline — will upload later', 2500);
@@ -1141,9 +1523,9 @@ async function commitWeightSheet(): Promise<void> {
     render();
     toast('saving…');
     try {
-      await patchWeightRow(id, measuredAt, weightKg, notes);
+      await patchWeightRow(id, measuredAt, weightKg, unit, notes);
       weights = weights.map((w) =>
-        w.id === id ? { ...w, measured_at: measuredAt, weight_kg: weightKg, notes } : w
+        w.id === id ? { ...w, measured_at: measuredAt, weight_kg: weightKg, unit, notes } : w
       );
       sortWeights();
       render();
@@ -1153,6 +1535,195 @@ async function commitWeightSheet(): Promise<void> {
       toast('update failed — try again');
     }
   }
+}
+
+// ─── Cook session sheet (v1.7) ──────────────────────────────────────────────
+
+function openCookSheetForNew(): void {
+  cookSheet = {
+    cookId: null,
+    chip: 'now',
+    cookedAtLocal: isoToDatetimeLocal(new Date().toISOString()),
+    description: '',
+    totalPortions: '',
+    notes: '',
+  };
+  render();
+}
+
+function openCookSheetForEdit(c: CookSession): void {
+  cookSheet = {
+    cookId: c.id,
+    chip: chipForIso(c.cooked_at),
+    cookedAtLocal: isoToDatetimeLocal(c.cooked_at),
+    description: c.description ?? '',
+    totalPortions: c.total_portions !== null ? c.total_portions.toString() : '',
+    notes: c.notes ?? '',
+  };
+  cookLightbox = null;
+  render();
+}
+
+function closeCookSheet(force = false): void {
+  if (!cookSheet) return;
+  const s = cookSheet;
+  const hasContent =
+    s.description.trim().length > 0 || s.notes.trim().length > 0 || s.totalPortions.trim() !== '';
+  if (!force && hasContent) {
+    if (!window.confirm('Discard this cook?')) return;
+  }
+  cookSheet = null;
+  render();
+}
+
+function cookSheetIsSaveable(s: CookSheetState): boolean {
+  // She must give a description so the strip + meal-picker can show something
+  // readable. Portions stay optional.
+  return s.description.trim().length > 0;
+}
+
+function resolveCookedAt(s: CookSheetState): string {
+  if (s.chip === 'custom') return datetimeLocalToIso(s.cookedAtLocal);
+  return isoForChip(s.chip);
+}
+
+async function commitCookSheet(): Promise<void> {
+  if (!cookSheet) return;
+  if (!cookSheetIsSaveable(cookSheet)) {
+    toast('what did you cook?');
+    return;
+  }
+  const s = cookSheet;
+  const cookedAt = resolveCookedAt(s);
+  const description = s.description.trim();
+  const totalPortions = parsePortions(s.totalPortions);
+  const notes = s.notes.trim() === '' ? null : s.notes.trim();
+
+  if (s.cookId === null) {
+    const localId = uuid();
+    const optimistic: CookSession = {
+      id: localId,
+      cooked_at: cookedAt,
+      description,
+      total_portions: totalPortions,
+      notes,
+      pending: true,
+    };
+    cooks.unshift(optimistic);
+    sortCooks();
+    cookSheet = null;
+    render();
+    toast('saving…');
+    try {
+      const row = await insertCookRow(cookedAt, description, totalPortions, notes);
+      cooks = cooks.filter((c) => c.id !== localId);
+      cooks.unshift({
+        id: row.id,
+        cooked_at: row.cooked_at,
+        description: row.description,
+        total_portions: rowNumOrNull(row.total_portions),
+        notes: row.notes,
+        pending: false,
+      });
+      sortCooks();
+      render();
+      toast('saved ✓');
+    } catch (err) {
+      console.warn('[food-log] cook save failed, queueing:', err);
+      await queuePendingCook({
+        localId,
+        cooked_at: cookedAt,
+        description,
+        total_portions: totalPortions,
+        notes,
+      });
+      toast('saved offline — will upload later', 2500);
+    } finally {
+      updateQueueBanner();
+    }
+  } else {
+    const id = s.cookId;
+    cookSheet = null;
+    render();
+    toast('saving…');
+    try {
+      await patchCookRow(id, cookedAt, description, totalPortions, notes);
+      cooks = cooks.map((c) =>
+        c.id === id
+          ? {
+              ...c,
+              cooked_at: cookedAt,
+              description,
+              total_portions: totalPortions,
+              notes,
+            }
+          : c
+      );
+      sortCooks();
+      render();
+      toast('updated ✓');
+    } catch (err) {
+      console.error('[food-log] cook edit failed:', err);
+      toast('update failed — try again');
+    }
+  }
+}
+
+// ─── Runway analysis (v1.7) ────────────────────────────────────────────────
+
+interface CookRunway {
+  cook: CookSession;
+  portionsLogged: number; // sum of portions_consumed for linked meals
+  portionsLeft: number | null; // null if cook has no total_portions
+  ratePerDay: number | null; // portions per day since cooked_at; null if no meals
+  daysLeft: number | null; // portionsLeft / ratePerDay; null if either is null
+  nextCookHint: string | null; // human phrase like "by Wed evening"
+}
+
+function computeRunway(c: CookSession): CookRunway {
+  const linkedMeals = meals.filter((m) => m.cook_session_id === c.id);
+  const portionsLogged = linkedMeals.reduce((acc, m) => acc + (m.portions_consumed ?? 0), 0);
+  const portionsLeft =
+    c.total_portions !== null ? Math.max(0, c.total_portions - portionsLogged) : null;
+  const cookedTs = new Date(c.cooked_at).getTime();
+  const now = Date.now();
+  const daysSinceCook = Math.max(0.25, (now - cookedTs) / (24 * 60 * 60 * 1000));
+  const ratePerDay = portionsLogged > 0 ? portionsLogged / daysSinceCook : null;
+  const daysLeft =
+    portionsLeft !== null && ratePerDay !== null && ratePerDay > 0
+      ? portionsLeft / ratePerDay
+      : null;
+  let nextCookHint: string | null = null;
+  if (daysLeft !== null && portionsLeft !== null && portionsLeft > 0) {
+    const target = new Date(now + daysLeft * 24 * 60 * 60 * 1000);
+    const weekday = target.toLocaleDateString(undefined, { weekday: 'long' });
+    const hour = target.getHours();
+    const period = hour < 11 ? 'morning' : hour < 16 ? 'afternoon' : hour < 21 ? 'evening' : 'late';
+    nextCookHint = `cook again by ${weekday} ${period}`;
+  } else if (portionsLeft === 0) {
+    nextCookHint = 'finished — cook again soon';
+  }
+  return { cook: c, portionsLogged, portionsLeft, ratePerDay, daysLeft, nextCookHint };
+}
+
+// Cook sessions worth surfacing on home: cooked within lookback window AND
+// (no total_portions yet OR portions left > 0). If finished, drop from strip.
+function activeRunways(): CookRunway[] {
+  const cutoff = Date.now() - COOK_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+  return cooks
+    .filter((c) => new Date(c.cooked_at).getTime() >= cutoff)
+    .map(computeRunway)
+    .filter((r) => r.portionsLeft === null || r.portionsLeft > 0);
+}
+
+// Picker source — cook sessions selectable from the meal sheet. Same lookback,
+// includes finished ones (so she can attribute the very last bite). Sorted by
+// most recent so the latest cook is at the top.
+function pickableCooks(): CookSession[] {
+  const cutoff = Date.now() - COOK_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+  return cooks
+    .filter((c) => new Date(c.cooked_at).getTime() >= cutoff)
+    .sort((a, b) => new Date(b.cooked_at).getTime() - new Date(a.cooked_at).getTime());
 }
 
 // ─── Photo picker (inside sheet) ────────────────────────────────────────────
@@ -1205,6 +1776,10 @@ function sortMeals(): void {
 
 function sortWeights(): void {
   weights.sort((a, b) => new Date(b.measured_at).getTime() - new Date(a.measured_at).getTime());
+}
+
+function sortCooks(): void {
+  cooks.sort((a, b) => new Date(b.cooked_at).getTime() - new Date(a.cooked_at).getTime());
 }
 
 // ─── Render ─────────────────────────────────────────────────────────────────
@@ -1261,13 +1836,14 @@ function renderMealCard(m: Meal): HTMLElement {
 }
 
 function renderWeightRow(w: WeightEntry): HTMLElement {
+  const label = formatWeight(w.weight_kg, w.unit);
   const row = el('button', {
     class: 'weight-row',
     type: 'button',
     'data-weight-id': w.id,
-    'aria-label': `Weight ${w.weight_kg.toFixed(1)} kg on ${shortDate(w.measured_at)}`,
+    'aria-label': `Weight ${label} on ${shortDate(w.measured_at)}`,
   });
-  row.appendChild(el('span', { class: 'weight-row-kg' }, [`${w.weight_kg.toFixed(1)} kg`]));
+  row.appendChild(el('span', { class: 'weight-row-kg' }, [label]));
   const meta = el('span', { class: 'weight-row-meta' });
   meta.appendChild(
     document.createTextNode(`${dayLabel(w.measured_at)} · ${formatTime(w.measured_at)}`)
@@ -1375,10 +1951,9 @@ function render(): void {
   );
   app.appendChild(header);
 
-  // Sibling quick-action pills (Meal + Weight). The big bottom Add button is
-  // removed in v1.6 — these two siblings replace it. One screen, two parallel
-  // capture surfaces.
-  const quick = el('div', { class: 'quick-actions' });
+  // v1.7 — three quick-action pills: Meal (primary), Cooked (tertiary), Weight (secondary).
+  // Cooked sits between Meal and Weight because it's the closest in topic to Meal.
+  const quick = el('div', { class: 'quick-actions quick-actions-three' });
   const addMealBtn = el(
     'button',
     {
@@ -1390,6 +1965,17 @@ function render(): void {
     [el('span', { class: 'quick-icon', 'aria-hidden': 'true' }, ['➕']), ' Meal']
   );
   addMealBtn.addEventListener('click', () => openSheetForNew());
+  const addCookBtn = el(
+    'button',
+    {
+      class: 'quick-action quick-action-tertiary',
+      type: 'button',
+      id: 'add-cook-btn',
+      'aria-label': 'Log a cook session',
+    },
+    [el('span', { class: 'quick-icon', 'aria-hidden': 'true' }, ['🍳']), ' Cooked']
+  );
+  addCookBtn.addEventListener('click', () => openCookSheetForNew());
   const addWeightBtn = el(
     'button',
     {
@@ -1402,11 +1988,19 @@ function render(): void {
   );
   addWeightBtn.addEventListener('click', () => openWeightSheetForNew());
   quick.appendChild(addMealBtn);
+  quick.appendChild(addCookBtn);
   quick.appendChild(addWeightBtn);
   app.appendChild(quick);
 
   // Queue banner
   app.appendChild(el('div', { class: 'queue-banner', role: 'status', 'aria-live': 'polite' }));
+
+  // v1.7 — Cook runway strip. Shows active cook sessions above Today so she
+  // can see what batches are still feeding her + how long they'll last.
+  const runways = activeRunways();
+  if (runways.length > 0) {
+    app.appendChild(renderCookStrip(runways));
+  }
 
   // Today card
   const todayCard = el('section', { class: 'card' });
@@ -1450,6 +2044,23 @@ function render(): void {
       const list = el('div', { class: 'meal-list' });
       for (const m of items) list.appendChild(renderMealCard(m));
       body.appendChild(list);
+      // v1.7 — per-day add affordance. When she expands a past day, give her
+      // a one-tap path to log a missed meal into THAT day, no date-picker drill.
+      const addToDay = el(
+        'button',
+        {
+          type: 'button',
+          class: 'history-add-meal',
+          'aria-label': `Add a meal to ${dayLabel(new Date(dayKey).toISOString())}`,
+        },
+        [`+ Add meal to ${dayLabel(new Date(dayKey).toISOString())}`]
+      );
+      const dayKeyLocal = dayKey;
+      addToDay.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        openSheetForDay(dayKeyLocal);
+      });
+      body.appendChild(addToDay);
       details.appendChild(body);
       hist.appendChild(details);
     }
@@ -1469,6 +2080,9 @@ function render(): void {
   if (weightLightbox) {
     root.appendChild(buildWeightLightbox(weightLightbox));
   }
+  if (cookLightbox) {
+    root.appendChild(buildCookLightbox(cookLightbox));
+  }
 
   if (sheet) {
     root.appendChild(buildSheet(sheet));
@@ -1476,8 +2090,98 @@ function render(): void {
   if (weightSheet) {
     root.appendChild(buildWeightSheet(weightSheet));
   }
+  if (cookSheet) {
+    root.appendChild(buildCookSheet(cookSheet));
+  }
 
   void updateQueueBanner();
+}
+
+// ─── Cook runway strip (v1.7) ───────────────────────────────────────────────
+
+function renderCookStrip(runways: CookRunway[]): HTMLElement {
+  const section = el('section', { class: 'card cook-strip' });
+  const header = el('div', { class: 'card-header' });
+  header.appendChild(el('h2', { class: 'card-title' }, ['Cooks']));
+  header.appendChild(
+    el('span', { class: 'card-meta' }, [
+      `${runways.length} ${runways.length === 1 ? 'batch' : 'batches'}`,
+    ])
+  );
+  section.appendChild(header);
+
+  const list = el('div', { class: 'cook-list' });
+  for (const r of runways) {
+    list.appendChild(renderCookCard(r));
+  }
+  section.appendChild(list);
+  return section;
+}
+
+function renderCookCard(r: CookRunway): HTMLElement {
+  const card = el('button', {
+    class: 'cook-card',
+    type: 'button',
+    'data-cook-id': r.cook.id,
+    'aria-label': `Cook session: ${r.cook.description ?? '(no description)'}`,
+  });
+
+  // Top row: cook description (truncated) + pending pill if applicable.
+  const head = el('div', { class: 'cook-card-head' });
+  head.appendChild(
+    el('span', { class: 'cook-card-title' }, [
+      r.cook.description && r.cook.description.trim() !== ''
+        ? previewDescription(r.cook.description)
+        : '(no description)',
+    ])
+  );
+  if (r.cook.pending) {
+    head.appendChild(el('span', { class: 'meal-card-pending' }, ['queued']));
+  }
+  card.appendChild(head);
+
+  // Meta row: when cooked + portion status.
+  const meta = el('div', { class: 'cook-card-meta' });
+  meta.appendChild(
+    el('span', {}, [`${dayLabel(r.cook.cooked_at)} · ${formatTime(r.cook.cooked_at)}`])
+  );
+  card.appendChild(meta);
+
+  // Runway: portions consumed / total, days left, next-cook hint.
+  if (r.cook.total_portions !== null) {
+    const portionsStr =
+      r.portionsLeft !== null
+        ? `${r.portionsLeft.toFixed(r.portionsLeft % 1 === 0 ? 0 : 1)} of ${r.cook.total_portions.toFixed(r.cook.total_portions % 1 === 0 ? 0 : 1)} left`
+        : `${r.cook.total_portions.toFixed(0)} portions`;
+    const runway = el('div', { class: 'cook-card-runway' }, [portionsStr]);
+    if (r.daysLeft !== null && r.portionsLeft !== null && r.portionsLeft > 0) {
+      runway.appendChild(
+        el('span', { class: 'cook-card-days' }, [` · ~${r.daysLeft.toFixed(1)}d at your pace`])
+      );
+    }
+    card.appendChild(runway);
+    if (r.nextCookHint) {
+      card.appendChild(el('div', { class: 'cook-card-hint' }, [r.nextCookHint]));
+    }
+  } else {
+    // No total_portions: just show consumed so far.
+    if (r.portionsLogged > 0) {
+      card.appendChild(
+        el('div', { class: 'cook-card-runway' }, [
+          `${r.portionsLogged.toFixed(r.portionsLogged % 1 === 0 ? 0 : 1)} portions eaten · add total for runway`,
+        ])
+      );
+    } else {
+      card.appendChild(
+        el('div', { class: 'cook-card-runway cook-card-runway-dim' }, [
+          'Link meals to start tracking',
+        ])
+      );
+    }
+  }
+
+  card.addEventListener('click', () => openCookLightbox(r.cook));
+  return card;
 }
 
 // ─── Fuzzy time chip row (shared by meal + weight sheets) ───────────────────
@@ -1750,6 +2454,91 @@ function buildSheet(s: SheetState): HTMLElement {
   photosWrap.appendChild(photoInput);
   body.appendChild(photosWrap);
 
+  // v1.7 — Cook session linkage. Optional. Shows recent cooks as buttons +
+  // a "none" option. Selecting one reveals a portions input below.
+  const picks = pickableCooks();
+  if (picks.length > 0) {
+    const cookWrap = el('div', { class: 'sheet-field' });
+    cookWrap.appendChild(el('span', { class: 'sheet-label' }, ['From a cook session? (optional)']));
+    const cookRow = el('div', { class: 'chip-row cook-pick-row' });
+
+    const noneBtn = el(
+      'button',
+      {
+        type: 'button',
+        class: 'chip cook-pick-chip' + (s.cookSessionId === null ? ' chip-selected' : ''),
+      },
+      ['None']
+    ) as HTMLButtonElement;
+    noneBtn.addEventListener('click', () => {
+      if (!sheet) return;
+      sheet.cookSessionId = null;
+      sheet.portionsConsumed = '';
+      render();
+    });
+    cookRow.appendChild(noneBtn);
+
+    for (const c of picks) {
+      const r = computeRunway(c);
+      const leftStr =
+        r.portionsLeft !== null
+          ? `${r.portionsLeft.toFixed(r.portionsLeft % 1 === 0 ? 0 : 1)} left`
+          : '';
+      const labelParts = [
+        c.description && c.description.trim() !== ''
+          ? c.description.length > 28
+            ? c.description.slice(0, 26) + '…'
+            : c.description
+          : '(no description)',
+        '·',
+        dayLabel(c.cooked_at),
+      ];
+      if (leftStr) labelParts.push('·', leftStr);
+      const isSel = sheet?.cookSessionId === c.id;
+      const btn = el(
+        'button',
+        {
+          type: 'button',
+          class: 'chip cook-pick-chip' + (isSel ? ' chip-selected' : ''),
+        },
+        [labelParts.join(' ')]
+      ) as HTMLButtonElement;
+      btn.addEventListener('click', () => {
+        if (!sheet) return;
+        sheet.cookSessionId = c.id;
+        // Default portions to 1 if currently blank.
+        if (sheet.portionsConsumed.trim() === '') sheet.portionsConsumed = '1';
+        render();
+      });
+      cookRow.appendChild(btn);
+    }
+    cookWrap.appendChild(cookRow);
+
+    // Portions consumed (only shown when linked to a cook).
+    if (s.cookSessionId !== null) {
+      const portionsField = el('label', { class: 'sheet-field sheet-field-tight' });
+      portionsField.appendChild(el('span', { class: 'sheet-label' }, ['Portions of that batch']));
+      const portionsInput = el('input', {
+        type: 'number',
+        inputmode: 'decimal',
+        step: '0.5',
+        min: '0',
+        max: '50',
+        class: 'sheet-weight-input',
+        placeholder: '1',
+        autocomplete: 'off',
+      }) as HTMLInputElement;
+      portionsInput.value = s.portionsConsumed;
+      portionsInput.addEventListener('input', () => {
+        if (sheet) sheet.portionsConsumed = portionsInput.value;
+      });
+      portionsField.appendChild(portionsInput);
+      cookWrap.appendChild(portionsField);
+    }
+
+    body.appendChild(cookWrap);
+  }
+
   panel.appendChild(body);
 
   const footer = el('div', { class: 'sheet-footer' });
@@ -1879,23 +2668,77 @@ function buildWeightSheet(s: WeightSheetState): HTMLElement {
   reflectCustomVisibility(s.chip);
   body.appendChild(timeWrap);
 
-  // Weight numeric input.
+  // v1.7 — Weight numeric input + unit toggle.
   const kgWrap = el('label', { class: 'sheet-field' });
-  kgWrap.appendChild(el('span', { class: 'sheet-label' }, ['Weight (kg)']));
+  const labelRow = el('div', { class: 'sheet-label-row' });
+  labelRow.appendChild(el('span', { class: 'sheet-label' }, ['Weight']));
+
+  // Unit toggle (kg | lb). Switching converts the current value so she
+  // doesn't have to mentally re-do the math.
+  const toggle = el('div', { class: 'unit-toggle', role: 'radiogroup', 'aria-label': 'Unit' });
+  const kgBtn = el(
+    'button',
+    {
+      type: 'button',
+      class: 'unit-toggle-btn' + (s.unit === 'kg' ? ' unit-toggle-selected' : ''),
+      role: 'radio',
+      'aria-checked': s.unit === 'kg' ? 'true' : 'false',
+    },
+    ['kg']
+  ) as HTMLButtonElement;
+  const lbBtn = el(
+    'button',
+    {
+      type: 'button',
+      class: 'unit-toggle-btn' + (s.unit === 'lb' ? ' unit-toggle-selected' : ''),
+      role: 'radio',
+      'aria-checked': s.unit === 'lb' ? 'true' : 'false',
+    },
+    ['lb']
+  ) as HTMLButtonElement;
+
   const kgInput = el('input', {
     type: 'number',
     inputmode: 'decimal',
     step: '0.1',
     min: '0',
-    max: '500',
+    max: '1000',
     class: 'sheet-weight-input',
     id: 'sheet-weight-input',
-    placeholder: 'e.g. 64.3',
+    placeholder: s.unit === 'lb' ? 'e.g. 145.6' : 'e.g. 66.0',
     autocomplete: 'off',
   }) as HTMLInputElement;
-  kgInput.value = s.weightKg;
+  kgInput.value = s.weightValue;
+
+  function switchUnit(toUnit: WeightUnit): void {
+    if (!weightSheet) return;
+    if (weightSheet.unit === toUnit) return;
+    // Convert the current entered value if it's a valid number.
+    const current = parseWeightValue(weightSheet.weightValue);
+    weightSheet.unit = toUnit;
+    if (current !== null) {
+      const kg = unitToKg(current, toUnit === 'kg' ? 'lb' : 'kg');
+      const converted = kgToUnit(kg, toUnit);
+      weightSheet.weightValue = converted.toFixed(1);
+      kgInput.value = weightSheet.weightValue;
+    }
+    // Toggle visuals.
+    kgBtn.classList.toggle('unit-toggle-selected', toUnit === 'kg');
+    lbBtn.classList.toggle('unit-toggle-selected', toUnit === 'lb');
+    kgBtn.setAttribute('aria-checked', toUnit === 'kg' ? 'true' : 'false');
+    lbBtn.setAttribute('aria-checked', toUnit === 'lb' ? 'true' : 'false');
+    kgInput.placeholder = toUnit === 'lb' ? 'e.g. 145.6' : 'e.g. 66.0';
+    updateSaveButton();
+  }
+  kgBtn.addEventListener('click', () => switchUnit('kg'));
+  lbBtn.addEventListener('click', () => switchUnit('lb'));
+  toggle.appendChild(kgBtn);
+  toggle.appendChild(lbBtn);
+  labelRow.appendChild(toggle);
+  kgWrap.appendChild(labelRow);
+
   kgInput.addEventListener('input', () => {
-    if (weightSheet) weightSheet.weightKg = kgInput.value;
+    if (weightSheet) weightSheet.weightValue = kgInput.value;
     updateSaveButton();
   });
   kgWrap.appendChild(kgInput);
@@ -2068,6 +2911,16 @@ function closeWeightLightbox(): void {
   render();
 }
 
+function openCookLightbox(c: CookSession): void {
+  cookLightbox = c;
+  render();
+}
+
+function closeCookLightbox(): void {
+  cookLightbox = null;
+  render();
+}
+
 function buildWeightLightbox(w: WeightEntry): HTMLElement {
   const root = el('div', {
     class: 'lightbox weight-lightbox',
@@ -2076,7 +2929,9 @@ function buildWeightLightbox(w: WeightEntry): HTMLElement {
   });
   const inner = el('div', { class: 'lightbox-inner' });
 
-  inner.appendChild(el('div', { class: 'lightbox-weight-kg' }, [`${w.weight_kg.toFixed(1)} kg`]));
+  inner.appendChild(
+    el('div', { class: 'lightbox-weight-kg' }, [formatWeight(w.weight_kg, w.unit)])
+  );
   inner.appendChild(
     el('div', { class: 'lightbox-time' }, [
       `${dayLabel(w.measured_at)} · ${formatTime(w.measured_at)}`,
@@ -2151,16 +3006,303 @@ function buildWeightLightbox(w: WeightEntry): HTMLElement {
   return root;
 }
 
+// ─── Cook-session sheet UI (v1.7) ───────────────────────────────────────────
+
+function buildCookSheet(s: CookSheetState): HTMLElement {
+  const overlay = el('div', {
+    class: 'sheet-overlay cook-sheet-overlay',
+    role: 'dialog',
+    'aria-modal': 'true',
+  });
+  const panel = el('div', { class: 'sheet-panel' });
+
+  const topBar = el('div', { class: 'sheet-topbar' });
+  topBar.appendChild(
+    el('h2', { class: 'sheet-title' }, [s.cookId === null ? 'Log cook' : 'Edit cook'])
+  );
+  const closeBtn = el('button', { class: 'sheet-close', type: 'button', 'aria-label': 'Close' }, [
+    '✕',
+  ]);
+  closeBtn.addEventListener('click', () => closeCookSheet());
+  topBar.appendChild(closeBtn);
+  panel.appendChild(topBar);
+
+  const body = el('div', { class: 'sheet-body' });
+
+  // When-row (chip + custom date+time).
+  const timeWrap = el('div', { class: 'sheet-field' });
+  const timeLabelRow = el('div', { class: 'sheet-label-row' });
+  timeLabelRow.appendChild(el('span', { class: 'sheet-label' }, ['When cooked']));
+  const chipDisplay = el('span', { class: 'sheet-chip-display' }, [chipLabel(s.chip)]);
+  timeLabelRow.appendChild(chipDisplay);
+  timeWrap.appendChild(timeLabelRow);
+
+  const customWrap = el('div', { class: 'sheet-custom-row' });
+  const [datePart, timePart] = (
+    s.cookedAtLocal || isoToDatetimeLocal(new Date().toISOString())
+  ).split('T');
+  const dateInput = el('input', {
+    type: 'date',
+    class: 'sheet-date',
+    value: datePart,
+    'aria-label': 'Date cooked',
+  }) as HTMLInputElement;
+  const timeInput = el('input', {
+    type: 'time',
+    class: 'sheet-time',
+    value: timePart,
+    'aria-label': 'Time cooked',
+  }) as HTMLInputElement;
+  const recombine = (): void => {
+    if (cookSheet && dateInput.value && timeInput.value) {
+      cookSheet.cookedAtLocal = `${dateInput.value}T${timeInput.value}`;
+    }
+  };
+  dateInput.addEventListener('input', recombine);
+  timeInput.addEventListener('input', recombine);
+  customWrap.appendChild(dateInput);
+  customWrap.appendChild(timeInput);
+
+  function reflectCustom(c: ChipId): void {
+    if (c === 'custom') customWrap.classList.add('visible');
+    else customWrap.classList.remove('visible');
+  }
+
+  const chipApi = buildChipRow(
+    s.chip,
+    (c) => {
+      if (cookSheet) cookSheet.chip = c;
+      chipDisplay.textContent = chipLabel(c);
+      reflectCustom(c);
+    },
+    'cook'
+  );
+  timeWrap.appendChild(chipApi.node);
+  timeWrap.appendChild(customWrap);
+  reflectCustom(s.chip);
+  body.appendChild(timeWrap);
+
+  // What did you cook? (required)
+  const descWrap = el('label', { class: 'sheet-field' });
+  descWrap.appendChild(el('span', { class: 'sheet-label' }, ['What did you cook?']));
+  const desc = el('textarea', {
+    class: 'sheet-desc',
+    rows: '2',
+    placeholder: "e.g. 6 chicken thighs, oven 200° 35min, za'atar",
+  }) as HTMLTextAreaElement;
+  desc.value = s.description;
+  const autoGrow = (): void => {
+    desc.style.height = 'auto';
+    desc.style.height = desc.scrollHeight + 'px';
+  };
+  desc.addEventListener('input', () => {
+    if (cookSheet) cookSheet.description = desc.value;
+    autoGrow();
+    updateSaveButton();
+  });
+  descWrap.appendChild(desc);
+  body.appendChild(descWrap);
+  setTimeout(autoGrow, 0);
+
+  // Total portions (optional)
+  const portionsWrap = el('label', { class: 'sheet-field' });
+  portionsWrap.appendChild(
+    el('span', { class: 'sheet-label' }, ['Total portions (optional, enables runway)'])
+  );
+  const portionsInput = el('input', {
+    type: 'number',
+    inputmode: 'decimal',
+    step: '0.5',
+    min: '0',
+    max: '50',
+    class: 'sheet-weight-input',
+    placeholder: 'e.g. 6',
+    autocomplete: 'off',
+  }) as HTMLInputElement;
+  portionsInput.value = s.totalPortions;
+  portionsInput.addEventListener('input', () => {
+    if (cookSheet) cookSheet.totalPortions = portionsInput.value;
+  });
+  portionsWrap.appendChild(portionsInput);
+  body.appendChild(portionsWrap);
+
+  // Notes (optional)
+  const notesWrap = el('label', { class: 'sheet-field' });
+  notesWrap.appendChild(el('span', { class: 'sheet-label' }, ['Notes (optional)']));
+  const notes = el('textarea', {
+    class: 'sheet-desc',
+    rows: '2',
+    placeholder: 'anything (recipe link, fridge spot, eat by…)',
+  }) as HTMLTextAreaElement;
+  notes.value = s.notes;
+  notes.addEventListener('input', () => {
+    if (cookSheet) cookSheet.notes = notes.value;
+  });
+  notesWrap.appendChild(notes);
+  body.appendChild(notesWrap);
+
+  panel.appendChild(body);
+
+  const footer = el('div', { class: 'sheet-footer' });
+  const cancelBtn = el('button', { type: 'button', class: 'sheet-cancel' }, ['Cancel']);
+  cancelBtn.addEventListener('click', () => closeCookSheet());
+  footer.appendChild(cancelBtn);
+  const saveAttrs: Record<string, string> = {
+    type: 'button',
+    class: 'sheet-save',
+  };
+  if (!cookSheetIsSaveable(s)) saveAttrs.disabled = 'true';
+  const saveBtn = el('button', saveAttrs, ['Save']);
+  saveBtn.addEventListener('click', () => {
+    void commitCookSheet();
+  });
+  footer.appendChild(saveBtn);
+  panel.appendChild(footer);
+
+  function updateSaveButton(): void {
+    if (!cookSheet) return;
+    if (cookSheetIsSaveable(cookSheet)) {
+      saveBtn.removeAttribute('disabled');
+    } else {
+      saveBtn.setAttribute('disabled', 'true');
+    }
+  }
+
+  overlay.addEventListener('click', (ev) => {
+    if (ev.target === overlay) closeCookSheet();
+  });
+  void chipApi.setChip;
+  overlay.appendChild(panel);
+  return overlay;
+}
+
+// ─── Cook lightbox ──────────────────────────────────────────────────────────
+
+function buildCookLightbox(c: CookSession): HTMLElement {
+  const root = el('div', {
+    class: 'lightbox cook-lightbox',
+    role: 'dialog',
+    'aria-modal': 'true',
+  });
+  const inner = el('div', { class: 'lightbox-inner' });
+
+  inner.appendChild(
+    el('div', { class: 'lightbox-weight-kg' }, [
+      c.description && c.description.trim() !== '' ? c.description : '(no description)',
+    ])
+  );
+  inner.appendChild(
+    el('div', { class: 'lightbox-time' }, [`${dayLabel(c.cooked_at)} · ${formatTime(c.cooked_at)}`])
+  );
+
+  const r = computeRunway(c);
+  const runwayLines: string[] = [];
+  if (c.total_portions !== null) {
+    if (r.portionsLeft !== null) {
+      runwayLines.push(
+        `${r.portionsLeft.toFixed(r.portionsLeft % 1 === 0 ? 0 : 1)} of ${c.total_portions.toFixed(0)} portions left`
+      );
+    }
+    if (r.ratePerDay !== null) {
+      runwayLines.push(`rate: ${r.ratePerDay.toFixed(2)} portions/day`);
+    }
+    if (r.daysLeft !== null && r.portionsLeft !== null && r.portionsLeft > 0) {
+      runwayLines.push(`~${r.daysLeft.toFixed(1)} days at this pace`);
+    }
+    if (r.nextCookHint) runwayLines.push(r.nextCookHint);
+  } else {
+    runwayLines.push(
+      r.portionsLogged > 0
+        ? `${r.portionsLogged.toFixed(1)} portions logged · add Total Portions for runway`
+        : 'no portions logged yet'
+    );
+  }
+  inner.appendChild(el('div', { class: 'lightbox-desc' }, [runwayLines.join('  ·  ')]));
+
+  if (c.notes && c.notes.trim() !== '') {
+    inner.appendChild(el('div', { class: 'lightbox-desc' }, [c.notes]));
+  }
+
+  const actions = el('div', { class: 'lightbox-actions' });
+  const closeBtn = el('button', { class: 'lightbox-close', type: 'button' }, ['Close']);
+  closeBtn.addEventListener('click', closeCookLightbox);
+  actions.appendChild(closeBtn);
+
+  if (!c.pending) {
+    const editBtn = el(
+      'button',
+      { class: 'lightbox-edit', type: 'button', 'aria-label': 'Edit cook' },
+      ['Edit']
+    );
+    editBtn.addEventListener('click', () => openCookSheetForEdit(c));
+    actions.appendChild(editBtn);
+
+    const delBtn = el('button', {
+      class: 'lightbox-delete',
+      type: 'button',
+      'aria-label': 'Hold to delete cook',
+    });
+    delBtn.appendChild(el('span', { class: 'hold-fill' }));
+    delBtn.appendChild(el('span', { class: 'lightbox-delete-label' }, ['Hold to delete']));
+    let holdTimer: ReturnType<typeof setTimeout> | null = null;
+    const startHold = (): void => {
+      delBtn.classList.add('holding');
+      holdTimer = setTimeout(() => {
+        void (async () => {
+          try {
+            await deleteCookRow(c.id);
+            cooks = cooks.filter((x) => x.id !== c.id);
+            // Linked meals stay; their cook_session_id is now stale locally
+            // until next fetch (server already nulled them via ON DELETE).
+            meals = meals.map((m) =>
+              m.cook_session_id === c.id ? { ...m, cook_session_id: null } : m
+            );
+            closeCookLightbox();
+            toast('deleted');
+          } catch (err) {
+            console.error('[food-log] cook delete failed:', err);
+            toast('delete failed');
+            delBtn.classList.remove('holding');
+          }
+        })();
+      }, 700);
+    };
+    const cancelHold = (): void => {
+      delBtn.classList.remove('holding');
+      if (holdTimer) {
+        clearTimeout(holdTimer);
+        holdTimer = null;
+      }
+    };
+    delBtn.addEventListener('pointerdown', startHold);
+    delBtn.addEventListener('pointerup', cancelHold);
+    delBtn.addEventListener('pointerleave', cancelHold);
+    delBtn.addEventListener('pointercancel', cancelHold);
+    actions.appendChild(delBtn);
+  }
+
+  inner.appendChild(actions);
+  root.appendChild(inner);
+  root.addEventListener('click', (ev) => {
+    if (ev.target === root) closeCookLightbox();
+  });
+  return root;
+}
+
 // ─── Boot ──────────────────────────────────────────────────────────────────
 
 async function boot(): Promise<void> {
   render(); // initial paint: empty state + quick-action buttons
   try {
-    const [m, w] = await Promise.all([fetchMeals(), fetchWeights()]);
+    const [m, w, c] = await Promise.all([fetchMeals(), fetchWeights(), fetchCooks()]);
     meals = m;
     weights = w;
+    cooks = c;
     sortMeals();
     sortWeights();
+    sortCooks();
+    // Seed display unit from most recent weight if any.
+    if (weights.length > 0) weightDisplayUnit = weights[0].unit;
     render();
   } catch (err) {
     console.warn('[food-log] initial fetch failed (showing empty):', err);

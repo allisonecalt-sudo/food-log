@@ -101,6 +101,7 @@ create table if not exists public.weight_log (
   measured_at timestamptz not null default now(),
   weight_kg numeric(5,2) not null,
   notes text,                          -- nullable; voice-to-text friendly
+  unit text not null default 'kg' check (unit in ('kg','lb')), -- v1.7 add
   created_at timestamptz not null default now()
 );
 
@@ -118,3 +119,43 @@ create policy "anon read"   on public.weight_log for select using (true);
 create policy "anon insert" on public.weight_log for insert with check (true);
 create policy "anon update" on public.weight_log for update using (true) with check (true);
 create policy "anon delete" on public.weight_log for delete using (true);
+
+-- 5) v1.7 cook_sessions — one cook event yields portions consumed across many
+--    meals. Decoupling cook from eat is the schema win Allison directed on
+--    2026-05-26: "i can have food, [the app can] start figuring out when to
+--    cook." A `cooked_at` column on meals can't compute runway; a session can.
+
+create table if not exists public.cook_sessions (
+  id uuid primary key default gen_random_uuid(),
+  cooked_at timestamptz not null default now(),
+  description text,
+  total_portions numeric(6,2),   -- estimated yield; nullable for "I don't know yet"
+  notes text,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists cook_sessions_cooked_at_idx
+  on public.cook_sessions (cooked_at desc);
+
+alter table public.cook_sessions enable row level security;
+
+drop policy if exists "anon read"   on public.cook_sessions;
+drop policy if exists "anon insert" on public.cook_sessions;
+drop policy if exists "anon update" on public.cook_sessions;
+drop policy if exists "anon delete" on public.cook_sessions;
+
+create policy "anon read"   on public.cook_sessions for select using (true);
+create policy "anon insert" on public.cook_sessions for insert with check (true);
+create policy "anon update" on public.cook_sessions for update using (true) with check (true);
+create policy "anon delete" on public.cook_sessions for delete using (true);
+
+-- 6) v1.7 meals additions: link to cook_session + portions consumed of that batch.
+alter table public.meals
+  add column if not exists cook_session_id uuid
+  references public.cook_sessions(id) on delete set null;
+
+alter table public.meals
+  add column if not exists portions_consumed numeric(5,2);
+
+create index if not exists meals_cook_session_id_idx
+  on public.meals (cook_session_id);

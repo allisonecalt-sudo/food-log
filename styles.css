@@ -1062,3 +1062,187 @@ button {
   letter-spacing: var(--track-display);
   margin-bottom: 8px;
 }
+
+/* ----------------------------------------------------------------------------
+ * v1.7 additions — cook sessions, lb/kg unit toggle, per-day add affordance
+ * --------------------------------------------------------------------------- */
+
+/* --- 3rd quick-action button + tertiary color ---------------------------- */
+
+/* The three pills wrap on narrow screens so labels stay legible. */
+.quick-actions-three {
+  flex-wrap: wrap;
+}
+
+.quick-action-tertiary {
+  background: var(--accent-warn); /* warm amber sits between peach + olive */
+  color: #3a2e1f;
+  border: 1px solid #a87d0e;
+  box-shadow:
+    0 3px 10px rgba(212, 160, 23, 0.28),
+    0 1px 0 rgba(255, 255, 255, 0.4) inset;
+}
+
+.quick-action-tertiary:hover {
+  background: #e3b231;
+}
+
+/* --- Cook strip on home -------------------------------------------------- */
+
+.cook-strip {
+  /* Sits above Today; gentle differentiation via a thin amber accent edge. */
+  border-left: 3px solid var(--accent-warn);
+}
+
+.cook-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cook-card {
+  display: block;
+  width: 100%;
+  text-align: start;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  transition: transform var(--dur-base) var(--ease-spring);
+}
+
+.cook-card:active {
+  transform: scale(0.985);
+  background: var(--bg-elev-3);
+}
+
+.cook-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.cook-card-title {
+  font-weight: 700;
+  font-size: var(--font-body);
+  color: var(--text);
+  letter-spacing: 0.2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.cook-card-meta {
+  font-size: var(--font-meta);
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+
+.cook-card-runway {
+  font-size: var(--font-small);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.cook-card-runway-dim {
+  color: var(--text-dim);
+  font-weight: 500;
+  font-style: italic;
+}
+
+.cook-card-days {
+  color: var(--text-dim);
+  font-weight: 500;
+}
+
+.cook-card-hint {
+  margin-top: 4px;
+  font-size: var(--font-meta);
+  color: var(--accent-press);
+  font-weight: 600;
+}
+
+/* --- Cook-session pick row inside the meal sheet ------------------------- */
+
+.cook-pick-row {
+  margin-top: 2px;
+}
+
+.cook-pick-chip {
+  /* Wider than the time chips because the labels embed description + when + left. */
+  max-width: 100%;
+  text-align: start;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sheet-field-tight {
+  margin-top: 4px;
+  gap: 4px;
+}
+
+/* --- Per-day "+ Add meal here" inside history accordion ----------------- */
+
+.history-add-meal {
+  margin-top: 10px;
+  width: 100%;
+  background: var(--bg-elev-2);
+  color: var(--text);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  font-size: var(--font-small);
+  font-weight: 600;
+  text-align: center;
+  transition:
+    background var(--dur-base) ease,
+    transform var(--dur-base) var(--ease-spring);
+}
+
+.history-add-meal:hover {
+  background: var(--bg-elev-3);
+}
+
+.history-add-meal:active {
+  transform: scale(0.985);
+}
+
+/* --- Unit toggle (kg | lb) in weight sheet ------------------------------ */
+
+.unit-toggle {
+  display: inline-flex;
+  gap: 2px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  padding: 2px;
+}
+
+.unit-toggle-btn {
+  font-family: inherit;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--font-small);
+  font-weight: 700;
+  padding: 4px 14px;
+  border-radius: var(--radius-pill);
+  text-transform: lowercase;
+  letter-spacing: 0.4px;
+  transition:
+    background var(--dur-base) ease,
+    color var(--dur-base) ease;
+}
+
+.unit-toggle-selected {
+  background: var(--accent);
+  color: #fff;
+}
+
+.unit-toggle-btn:active {
+  transform: scale(0.95);
+}
