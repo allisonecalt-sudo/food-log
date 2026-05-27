@@ -159,3 +159,31 @@ alter table public.meals
 
 create index if not exists meals_cook_session_id_idx
   on public.meals (cook_session_id);
+
+-- 7) v1.8 notes — sibling surface (parallel to meals / weight_log / cook_sessions).
+-- Pure scratchpad: timestamp + free text. Allison kept typing app-meta thoughts
+-- ("maybe we should make this just for claud") into meals.description because
+-- there was nowhere else to put them. Substrate-only — no tags, no categories,
+-- no linking to meals. Just capture so nothing gets lost.
+
+create table if not exists public.notes (
+  id uuid primary key default gen_random_uuid(),
+  noted_at timestamptz not null default now(),
+  text text not null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists notes_noted_at_idx
+  on public.notes (noted_at desc);
+
+alter table public.notes enable row level security;
+
+drop policy if exists "anon read"   on public.notes;
+drop policy if exists "anon insert" on public.notes;
+drop policy if exists "anon update" on public.notes;
+drop policy if exists "anon delete" on public.notes;
+
+create policy "anon read"   on public.notes for select using (true);
+create policy "anon insert" on public.notes for insert with check (true);
+create policy "anon update" on public.notes for update using (true) with check (true);
+create policy "anon delete" on public.notes for delete using (true);

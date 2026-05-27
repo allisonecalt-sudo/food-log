@@ -49,14 +49,17 @@ const MEALS_TABLE = 'meals';
 const PHOTOS_TABLE = 'meal_photos';
 const WEIGHT_TABLE = 'weight_log';
 const COOKS_TABLE = 'cook_sessions';
+const NOTES_TABLE = 'notes'; // v1.8 — scratchpad surface, sibling to meals/weight/cooks
 const HISTORY_DAYS = 30;
 const COOK_LOOKBACK_DAYS = 14; // cook sessions older than this are dropped from the runway strip
 const WEIGHT_PREVIEW_COUNT = 5; // last N weights shown collapsed on home
+const NOTES_PREVIEW_COUNT = 5; // last N notes shown collapsed on home
 const LB_PER_KG = 2.20462;
 const IDB_NAME = 'food-log-queue';
 const IDB_STORE_MEALS = 'pending-meals';
 const IDB_STORE_WEIGHTS = 'pending-weights'; // v1.6 add
 const IDB_STORE_COOKS = 'pending-cooks'; // v1.7 add
+const IDB_STORE_NOTES = 'pending-notes'; // v1.8 add
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -131,6 +134,23 @@ interface PendingWeight {
   weight_kg: number;
   unit: WeightUnit;
   notes: string | null;
+}
+
+// v1.8 — note = scratchpad row. Pure substrate: timestamp + free text. No tags,
+// no categories, no linking to meals. Sibling to meals/weight/cooks, not nested.
+// Reason: Allison kept typing app-meta thoughts ("maybe we should make this just
+// for claud") into meals.description because there was nowhere else.
+interface Note {
+  id: string;
+  noted_at: string;
+  text: string;
+  pending: boolean;
+}
+
+interface PendingNote {
+  localId: string;
+  noted_at: string;
+  text: string;
 }
 
 // State the meal-entry sheet manages while it's open.
@@ -273,6 +293,15 @@ interface CookSheetState {
   notes: string;
 }
 
+// v1.8 — note sheet. Minimal by design — just a textarea + auto-now timestamp.
+// No fuzzy-time chips here — notes are "right now, write it down" thoughts. If
+// she needs to back-date one later, she can edit. Keeping the sheet smaller
+// than meal/weight/cook reinforces "this is just a quick capture."
+interface NoteSheetState {
+  noteId: string | null;
+  text: string;
+}
+
 // ─── DOM helpers ────────────────────────────────────────────────────────────
 
 function $(sel: string, root: ParentNode = document): HTMLElement | null {
@@ -318,13 +347,17 @@ function uuid(): string {
 let meals: Meal[] = [];
 let weights: WeightEntry[] = [];
 let cooks: CookSession[] = [];
+let notes: Note[] = [];
 let lightboxMeal: Meal | null = null;
 let weightLightbox: WeightEntry | null = null;
 let cookLightbox: CookSession | null = null;
+let noteLightbox: Note | null = null;
 let sheet: SheetState | null = null;
 let weightSheet: WeightSheetState | null = null;
 let cookSheet: CookSheetState | null = null;
+let noteSheet: NoteSheetState | null = null;
 let weightHistoryOpen = false;
+let notesHistoryOpen = false;
 // Last-used display unit for weight. New entries default to this. Initialized
 // to whatever the most-recent row used; falls back to 'kg' on empty history.
 let weightDisplayUnit: WeightUnit = 'kg';
@@ -420,8 +453,8 @@ function formatWeight(kg: number, unit: WeightUnit): string {
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    // v4: adds pending-cooks store.
-    const req = indexedDB.open(IDB_NAME, 4);
+    // v5: adds pending-notes store.
+    const req = indexedDB.open(IDB_NAME, 5);
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(IDB_STORE_MEALS)) {
@@ -432,6 +465,9 @@ function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(IDB_STORE_COOKS)) {
         db.createObjectStore(IDB_STORE_COOKS, { keyPath: 'localId' });
+      }
+      if (!db.objectStoreNames.contains(IDB_STORE_NOTES)) {
+        db.createObjectStore(IDB_STORE_NOTES, { keyPath: 'localId' });
       }
       // Best-effort: nuke v1 store so its photo-only entries don't linger.
       if (db.objectStoreNames.contains('pending')) {
@@ -545,6 +581,40 @@ async function removePendingCook(localId: string): Promise<void> {
   db.close();
 }
 
+async function queuePendingNote(item: PendingNote): Promise<void> {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE_NOTES, 'readwrite');
+    tx.objectStore(IDB_STORE_NOTES).put(item);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+
+async function readPendingNotes(): Promise<PendingNote[]> {
+  const db = await openDb();
+  const result = await new Promise<PendingNote[]>((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE_NOTES, 'readonly');
+    const req = tx.objectStore(IDB_STORE_NOTES).getAll();
+    req.onsuccess = () => resolve(req.result as PendingNote[]);
+    req.onerror = () => reject(req.error);
+  });
+  db.close();
+  return result;
+}
+
+async function removePendingNote(localId: string): Promise<void> {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE_NOTES, 'readwrite');
+    tx.objectStore(IDB_STORE_NOTES).delete(localId);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+
 // ─── Supabase API ───────────────────────────────────────────────────────────
 
 async function uploadPhoto(blob: Blob, path: string): Promise<void> {
@@ -605,6 +675,12 @@ interface CookRow {
   description: string | null;
   total_portions: number | string | null;
   notes: string | null;
+}
+
+interface NoteRow {
+  id: string;
+  noted_at: string;
+  text: string;
 }
 
 function rowNumOrNull(v: number | string | null | undefined): number | null {
@@ -851,6 +927,60 @@ async function deleteCookRow(cookId: string): Promise<void> {
     const text = await res.text();
     throw new Error(`cook delete failed (${res.status}): ${text}`);
   }
+}
+
+// ─── Notes API (v1.8) ───────────────────────────────────────────────────────
+
+async function insertNoteRow(notedAt: string, text: string): Promise<NoteRow> {
+  const res = await fetch(`${SB_URL}/rest/v1/${NOTES_TABLE}`, {
+    method: 'POST',
+    headers: {
+      apikey: SB_KEY,
+      Authorization: `Bearer ${SB_KEY}`,
+      'Content-Type': 'application/json',
+      Prefer: 'return=representation',
+    },
+    body: JSON.stringify({ noted_at: notedAt, text }),
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`note insert failed (${res.status}): ${t}`);
+  }
+  const rows = (await res.json()) as NoteRow[];
+  return rows[0];
+}
+
+async function deleteNoteRow(noteId: string): Promise<void> {
+  const res = await fetch(`${SB_URL}/rest/v1/${NOTES_TABLE}?id=eq.${encodeURIComponent(noteId)}`, {
+    method: 'DELETE',
+    headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` },
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`note delete failed (${res.status}): ${t}`);
+  }
+}
+
+async function fetchNotes(): Promise<Note[]> {
+  // Pull more than the preview count so the expanded view is populated too.
+  const url =
+    `${SB_URL}/rest/v1/${NOTES_TABLE}` +
+    `?select=id,noted_at,text` +
+    `&order=noted_at.desc&limit=200`;
+  const res = await fetch(url, {
+    headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` },
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`notes fetch failed (${res.status}): ${t}`);
+  }
+  const rows = (await res.json()) as NoteRow[];
+  return rows.map((r) => ({
+    id: r.id,
+    noted_at: r.noted_at,
+    text: r.text,
+    pending: false,
+  }));
 }
 
 async function fetchCooks(): Promise<CookSession[]> {
@@ -1162,6 +1292,26 @@ async function drainQueue(): Promise<void> {
       }
     }
     sortWeights();
+
+    // Then notes.
+    const pendingNotes = await readPendingNotes();
+    for (const item of pendingNotes) {
+      try {
+        const row = await insertNoteRow(item.noted_at, item.text);
+        await removePendingNote(item.localId);
+        notes = notes.filter((n) => n.id !== item.localId);
+        notes.unshift({
+          id: row.id,
+          noted_at: row.noted_at,
+          text: row.text,
+          pending: false,
+        });
+      } catch (err) {
+        console.warn('[food-log] note queue drain failed (will retry):', err);
+        break;
+      }
+    }
+    sortNotes();
     render();
   } finally {
     draining = false;
@@ -1175,12 +1325,14 @@ async function updateQueueBanner(): Promise<void> {
   const mealCount = (await readPendingMeals().catch(() => [])).length;
   const weightCount = (await readPendingWeights().catch(() => [])).length;
   const cookCount = (await readPendingCooks().catch(() => [])).length;
-  const total = mealCount + weightCount + cookCount;
+  const noteCount = (await readPendingNotes().catch(() => [])).length;
+  const total = mealCount + weightCount + cookCount + noteCount;
   if (total > 0) {
     const parts: string[] = [];
     if (mealCount > 0) parts.push(`${mealCount} meal${mealCount === 1 ? '' : 's'}`);
     if (weightCount > 0) parts.push(`${weightCount} weight${weightCount === 1 ? '' : 's'}`);
     if (cookCount > 0) parts.push(`${cookCount} cook${cookCount === 1 ? '' : 's'}`);
+    if (noteCount > 0) parts.push(`${noteCount} note${noteCount === 1 ? '' : 's'}`);
     banner.textContent = `${parts.join(' + ')} queued — will upload when online`;
     banner.classList.add('visible');
   } else {
@@ -1669,6 +1821,59 @@ async function commitCookSheet(): Promise<void> {
   }
 }
 
+// ─── Note sheet (v1.8) ──────────────────────────────────────────────────────
+
+function openNoteSheetForNew(): void {
+  noteSheet = { noteId: null, text: '' };
+  render();
+}
+
+function closeNoteSheet(force = false): void {
+  if (!noteSheet) return;
+  const hasContent = noteSheet.text.trim().length > 0;
+  if (!force && hasContent) {
+    if (!window.confirm('Discard this note?')) return;
+  }
+  noteSheet = null;
+  render();
+}
+
+function noteSheetIsSaveable(s: NoteSheetState): boolean {
+  return s.text.trim().length > 0;
+}
+
+async function commitNoteSheet(): Promise<void> {
+  if (!noteSheet) return;
+  if (!noteSheetIsSaveable(noteSheet)) {
+    toast('write something first');
+    return;
+  }
+  const s = noteSheet;
+  const notedAt = new Date().toISOString();
+  const text = s.text.trim();
+  const localId = uuid();
+  const optimistic: Note = { id: localId, noted_at: notedAt, text, pending: true };
+  notes.unshift(optimistic);
+  sortNotes();
+  noteSheet = null;
+  render();
+  toast('saving…');
+  try {
+    const row = await insertNoteRow(notedAt, text);
+    notes = notes.filter((n) => n.id !== localId);
+    notes.unshift({ id: row.id, noted_at: row.noted_at, text: row.text, pending: false });
+    sortNotes();
+    render();
+    toast('saved ✓');
+  } catch (err) {
+    console.warn('[food-log] note save failed, queueing:', err);
+    await queuePendingNote({ localId, noted_at: notedAt, text });
+    toast('saved offline — will upload later', 2500);
+  } finally {
+    updateQueueBanner();
+  }
+}
+
 // ─── Runway analysis (v1.7) ────────────────────────────────────────────────
 
 interface CookRunway {
@@ -1780,6 +1985,10 @@ function sortWeights(): void {
 
 function sortCooks(): void {
   cooks.sort((a, b) => new Date(b.cooked_at).getTime() - new Date(a.cooked_at).getTime());
+}
+
+function sortNotes(): void {
+  notes.sort((a, b) => new Date(b.noted_at).getTime() - new Date(a.noted_at).getTime());
 }
 
 // ─── Render ─────────────────────────────────────────────────────────────────
@@ -1952,15 +2161,26 @@ function render(): void {
   app.appendChild(header);
 
   // Quick-action pills — Meal (primary) + Weight (secondary) always shown;
+  // Notes (quaternary) always shown — meta-thoughts about the app kept leaking
+  // into meal descriptions, the pill gives them a home;
   // Cooked (tertiary) only when she's already started using cook sessions.
   // Rationale (2026-05-27 audit): zero cook_sessions logged across the first
   // 4 days of food-log usage; meanwhile her stated north-star design is "two
   // sibling pills at the top." Reveal Cooked the moment she has any history,
   // so the feature is one tap away the second it's relevant — but not earlier.
+  // Notes (v1.8) ships always-on because the need pre-dates the data: she was
+  // ALREADY misusing meal.description to hold app-meta thoughts.
   const showCookedBtn = cooks.length > 0;
-  const quick = el('div', {
-    class: showCookedBtn ? 'quick-actions quick-actions-three' : 'quick-actions',
-  });
+  const pillCount = 3 + (showCookedBtn ? 1 : 0);
+  // Use existing 3-pill wrap class for 3, add new 4-pill class for 4 so the
+  // grid stays calm at 412px mobile (two rows of two on narrow viewports).
+  const pillClass =
+    pillCount === 4
+      ? 'quick-actions quick-actions-four'
+      : pillCount === 3
+        ? 'quick-actions quick-actions-three'
+        : 'quick-actions';
+  const quick = el('div', { class: pillClass });
   const addMealBtn = el(
     'button',
     {
@@ -1983,6 +2203,17 @@ function render(): void {
     [el('span', { class: 'quick-icon', 'aria-hidden': 'true' }, ['⚖']), ' Weight']
   );
   addWeightBtn.addEventListener('click', () => openWeightSheetForNew());
+  const addNoteBtn = el(
+    'button',
+    {
+      class: 'quick-action quick-action-quaternary',
+      type: 'button',
+      id: 'add-note-btn',
+      'aria-label': 'Add a note',
+    },
+    [el('span', { class: 'quick-icon', 'aria-hidden': 'true' }, ['📝']), ' Note']
+  );
+  addNoteBtn.addEventListener('click', () => openNoteSheetForNew());
   quick.appendChild(addMealBtn);
   if (showCookedBtn) {
     const addCookBtn = el(
@@ -1999,6 +2230,7 @@ function render(): void {
     quick.appendChild(addCookBtn);
   }
   quick.appendChild(addWeightBtn);
+  quick.appendChild(addNoteBtn);
   app.appendChild(quick);
 
   // Queue banner
@@ -2081,6 +2313,9 @@ function render(): void {
   // Weight section (below meals).
   app.appendChild(renderWeightSection());
 
+  // Notes section (below weight).
+  app.appendChild(renderNotesSection());
+
   root.appendChild(app);
 
   if (lightboxMeal) {
@@ -2092,6 +2327,9 @@ function render(): void {
   if (cookLightbox) {
     root.appendChild(buildCookLightbox(cookLightbox));
   }
+  if (noteLightbox) {
+    root.appendChild(buildNoteLightbox(noteLightbox));
+  }
 
   if (sheet) {
     root.appendChild(buildSheet(sheet));
@@ -2101,6 +2339,9 @@ function render(): void {
   }
   if (cookSheet) {
     root.appendChild(buildCookSheet(cookSheet));
+  }
+  if (noteSheet) {
+    root.appendChild(buildNoteSheet(noteSheet));
   }
 
   void updateQueueBanner();
@@ -3306,18 +3547,246 @@ function buildCookLightbox(c: CookSession): HTMLElement {
   return root;
 }
 
+// ─── Notes UI (v1.8) ────────────────────────────────────────────────────────
+
+function openNoteLightbox(n: Note): void {
+  noteLightbox = n;
+  render();
+}
+
+function closeNoteLightbox(): void {
+  noteLightbox = null;
+  render();
+}
+
+function renderNoteRow(n: Note): HTMLElement {
+  const row = el('button', {
+    class: 'note-row',
+    type: 'button',
+    'data-note-id': n.id,
+    'aria-label': `Note from ${dayLabel(n.noted_at)} ${formatTime(n.noted_at)}`,
+  });
+  const meta = el('div', { class: 'note-row-meta' });
+  meta.appendChild(document.createTextNode(`${dayLabel(n.noted_at)} · ${formatTime(n.noted_at)}`));
+  if (n.pending) {
+    meta.appendChild(el('span', { class: 'note-row-pending' }, ['queued']));
+  }
+  row.appendChild(meta);
+  row.appendChild(el('div', { class: 'note-row-text' }, [previewDescription(n.text)]));
+  row.addEventListener('click', () => openNoteLightbox(n));
+  return row;
+}
+
+function renderNotesSection(): HTMLElement {
+  const section = el('section', { class: 'card notes-section' });
+  const header = el('div', { class: 'card-header' });
+  header.appendChild(el('h2', { class: 'card-title' }, ['Notes']));
+  if (notes.length > 0) {
+    header.appendChild(
+      el('span', { class: 'card-meta' }, [
+        `${notes.length} ${notes.length === 1 ? 'note' : 'notes'}`,
+      ])
+    );
+  }
+  section.appendChild(header);
+
+  if (notes.length === 0) {
+    section.appendChild(
+      el('div', { class: 'today-empty' }, ['No notes yet. Tap 📝 Note up top to add one.'])
+    );
+    return section;
+  }
+
+  const visible = notesHistoryOpen ? notes : notes.slice(0, NOTES_PREVIEW_COUNT);
+  const list = el('div', { class: 'note-list' });
+  for (const n of visible) list.appendChild(renderNoteRow(n));
+  section.appendChild(list);
+
+  if (notes.length > NOTES_PREVIEW_COUNT) {
+    const toggle = el('button', { class: 'weight-toggle', type: 'button' }, [
+      notesHistoryOpen ? 'Show recent' : `Show all ${notes.length}`,
+    ]);
+    toggle.addEventListener('click', () => {
+      notesHistoryOpen = !notesHistoryOpen;
+      render();
+    });
+    section.appendChild(toggle);
+  }
+
+  return section;
+}
+
+function buildNoteSheet(s: NoteSheetState): HTMLElement {
+  const overlay = el('div', {
+    class: 'sheet-overlay note-sheet-overlay',
+    role: 'dialog',
+    'aria-modal': 'true',
+  });
+  const panel = el('div', { class: 'sheet-panel' });
+
+  const topBar = el('div', { class: 'sheet-topbar' });
+  topBar.appendChild(el('h2', { class: 'sheet-title' }, ['New note']));
+  const closeBtn = el(
+    'button',
+    { class: 'sheet-close', type: 'button', id: 'note-sheet-close', 'aria-label': 'Close' },
+    ['✕']
+  );
+  closeBtn.addEventListener('click', () => closeNoteSheet());
+  topBar.appendChild(closeBtn);
+  panel.appendChild(topBar);
+
+  const body = el('div', { class: 'sheet-body' });
+
+  const wrap = el('label', { class: 'sheet-field' });
+  wrap.appendChild(el('span', { class: 'sheet-label' }, ['Note']));
+  const ta = el('textarea', {
+    class: 'sheet-desc',
+    id: 'sheet-note-text',
+    rows: '5',
+    placeholder: 'Anything — thought, idea, reminder…',
+    autofocus: 'true',
+  }) as HTMLTextAreaElement;
+  ta.value = s.text;
+  const autoGrow = (): void => {
+    ta.style.height = 'auto';
+    ta.style.height = ta.scrollHeight + 'px';
+  };
+  ta.addEventListener('input', () => {
+    if (noteSheet) noteSheet.text = ta.value;
+    autoGrow();
+    updateSaveButton();
+  });
+  wrap.appendChild(ta);
+  body.appendChild(wrap);
+  setTimeout(() => {
+    autoGrow();
+    ta.focus();
+  }, 0);
+
+  panel.appendChild(body);
+
+  const footer = el('div', { class: 'sheet-footer' });
+  const cancelBtn = el('button', { type: 'button', class: 'sheet-cancel' }, ['Cancel']);
+  cancelBtn.addEventListener('click', () => closeNoteSheet());
+  footer.appendChild(cancelBtn);
+
+  const saveAttrs: Record<string, string> = {
+    type: 'button',
+    class: 'sheet-save',
+    id: 'sheet-note-save',
+  };
+  if (!noteSheetIsSaveable(s)) saveAttrs.disabled = 'true';
+  const saveBtn = el('button', saveAttrs, ['Save']);
+  saveBtn.addEventListener('click', () => {
+    void commitNoteSheet();
+  });
+  footer.appendChild(saveBtn);
+  panel.appendChild(footer);
+
+  function updateSaveButton(): void {
+    if (!noteSheet) return;
+    if (noteSheetIsSaveable(noteSheet)) {
+      saveBtn.removeAttribute('disabled');
+    } else {
+      saveBtn.setAttribute('disabled', 'true');
+    }
+  }
+
+  overlay.addEventListener('click', (ev) => {
+    if (ev.target === overlay) closeNoteSheet();
+  });
+
+  overlay.appendChild(panel);
+  return overlay;
+}
+
+function buildNoteLightbox(n: Note): HTMLElement {
+  const root = el('div', {
+    class: 'lightbox note-lightbox',
+    role: 'dialog',
+    'aria-modal': 'true',
+  });
+  const inner = el('div', { class: 'lightbox-inner' });
+
+  inner.appendChild(
+    el('div', { class: 'lightbox-time' }, [`${dayLabel(n.noted_at)} · ${formatTime(n.noted_at)}`])
+  );
+  inner.appendChild(el('div', { class: 'lightbox-desc' }, [n.text]));
+
+  const actions = el('div', { class: 'lightbox-actions' });
+  const closeBtn = el('button', { class: 'lightbox-close', type: 'button' }, ['Close']);
+  closeBtn.addEventListener('click', closeNoteLightbox);
+  actions.appendChild(closeBtn);
+
+  if (!n.pending) {
+    const delBtn = el('button', {
+      class: 'lightbox-delete',
+      type: 'button',
+      'aria-label': 'Hold to delete note',
+    });
+    delBtn.appendChild(el('span', { class: 'hold-fill' }));
+    delBtn.appendChild(el('span', { class: 'lightbox-delete-label' }, ['Hold to delete']));
+    let holdTimer: ReturnType<typeof setTimeout> | null = null;
+    const startHold = (): void => {
+      delBtn.classList.add('holding');
+      holdTimer = setTimeout(() => {
+        void (async () => {
+          try {
+            await deleteNoteRow(n.id);
+            notes = notes.filter((x) => x.id !== n.id);
+            closeNoteLightbox();
+            toast('deleted');
+          } catch (err) {
+            console.error('[food-log] note delete failed:', err);
+            toast('delete failed');
+            delBtn.classList.remove('holding');
+          }
+        })();
+      }, 700);
+    };
+    const cancelHold = (): void => {
+      delBtn.classList.remove('holding');
+      if (holdTimer) {
+        clearTimeout(holdTimer);
+        holdTimer = null;
+      }
+    };
+    delBtn.addEventListener('pointerdown', startHold);
+    delBtn.addEventListener('pointerup', cancelHold);
+    delBtn.addEventListener('pointerleave', cancelHold);
+    delBtn.addEventListener('pointercancel', cancelHold);
+    actions.appendChild(delBtn);
+  }
+
+  inner.appendChild(actions);
+  root.appendChild(inner);
+
+  root.addEventListener('click', (ev) => {
+    if (ev.target === root) closeNoteLightbox();
+  });
+
+  return root;
+}
+
 // ─── Boot ──────────────────────────────────────────────────────────────────
 
 async function boot(): Promise<void> {
   render(); // initial paint: empty state + quick-action buttons
   try {
-    const [m, w, c] = await Promise.all([fetchMeals(), fetchWeights(), fetchCooks()]);
+    const [m, w, c, n] = await Promise.all([
+      fetchMeals(),
+      fetchWeights(),
+      fetchCooks(),
+      fetchNotes(),
+    ]);
     meals = m;
     weights = w;
     cooks = c;
+    notes = n;
     sortMeals();
     sortWeights();
     sortCooks();
+    sortNotes();
     // Seed display unit from most recent weight if any.
     if (weights.length > 0) weightDisplayUnit = weights[0].unit;
     render();

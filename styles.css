@@ -1246,3 +1246,108 @@ button {
 .unit-toggle-btn:active {
   transform: scale(0.95);
 }
+
+/* ----------------------------------------------------------------------------
+ * v1.8 additions — notes (scratchpad surface)
+ *
+ * Notes are a sibling surface to meals/weight/cooks. Always-on top-bar pill +
+ * compact list section at the bottom of the home page. Pure capture, no
+ * structure: timestamp + text.
+ *
+ * UX rationale (2026-05-27): ~3 of 22 meal entries were app-meta thoughts
+ * typed into meals.description because there was no other surface. The Notes
+ * pill ships always-visible (vs Cooked which is conditional) because the need
+ * pre-dates the data — she's already been doing this informally.
+ * --------------------------------------------------------------------------- */
+
+/* --- 4-pill layout: wrap into a tidy 2x2 grid on narrow screens ---------- */
+/* With four pills a single row gets cramped at 412px; force each pill to ~50%
+ * basis so wrapping gives a clean 2x2 (Meal+Cooked on row 1, Weight+Note on
+ * row 2 in insert order). 3-pill state keeps the existing .quick-actions-three
+ * wrap-allowed flex behavior (three slim pills fit on one row at 412px). */
+.quick-actions-four {
+  flex-wrap: wrap;
+}
+
+.quick-actions-four .quick-action {
+  flex: 1 1 calc(50% - 5px);
+  min-width: 0;
+}
+
+/* --- Quaternary pill (Notes) --------------------------------------------- */
+/* Lavender-tinted to sit visually apart from the food/body/cook triad while
+ * staying within the warm-cream palette feel. */
+.quick-action-quaternary {
+  background: #9b8db8;
+  color: #fff;
+  border: 1px solid #7c6e9c;
+  box-shadow:
+    0 3px 10px rgba(124, 110, 156, 0.28),
+    0 1px 0 rgba(255, 255, 255, 0.4) inset;
+}
+
+.quick-action-quaternary:hover {
+  background: #ab9ec8;
+}
+
+/* --- Notes section on home ----------------------------------------------- */
+.notes-section {
+  margin-top: 16px;
+  /* Match the weight-section accent style — thin accent edge to differentiate
+   * sibling surfaces without adding card-chrome noise. */
+  border-left: 3px solid #9b8db8;
+}
+
+.note-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.note-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  text-align: start;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  transition: transform var(--dur-base) var(--ease-spring);
+}
+
+.note-row:active {
+  transform: scale(0.985);
+  background: var(--bg-elev-3);
+}
+
+.note-row-meta {
+  font-size: var(--font-meta);
+  color: var(--text-dim);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.note-row-pending {
+  background: var(--accent-warn);
+  color: #3a2e1f;
+  font-size: var(--font-micro);
+  font-weight: 700;
+  letter-spacing: var(--track-label);
+  padding: 2px 6px;
+  border-radius: var(--radius-pill);
+  text-transform: uppercase;
+}
+
+.note-row-text {
+  font-size: var(--font-small);
+  color: var(--text);
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: pre-wrap;
+}

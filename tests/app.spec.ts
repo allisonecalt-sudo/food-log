@@ -62,6 +62,11 @@ async function mockSupabase(page: Page): Promise<void> {
     total_portions: number | null;
     notes: string | null;
   }> = [];
+  const notesRows: Array<{
+    id: string;
+    noted_at: string;
+    text: string;
+  }> = [];
 
   await page.route(/supabase\.co\/rest\/v1\/meals(\?.*)?$/, async (route: Route) => {
     const method = route.request().method();
@@ -290,6 +295,49 @@ async function mockSupabase(page: Page): Promise<void> {
       const id = idMatch?.replace(/^eq\./, '') ?? '';
       const idx = cookSessions.findIndex((c) => c.id === id);
       if (idx >= 0) cookSessions.splice(idx, 1);
+      await route.fulfill({ status: 204, body: '' });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.route(/supabase\.co\/rest\/v1\/notes(\?.*)?$/, async (route: Route) => {
+    const method = route.request().method();
+    const url = new URL(route.request().url());
+    if (method === 'GET') {
+      const sorted = [...notesRows].sort(
+        (a, b) => new Date(b.noted_at).getTime() - new Date(a.noted_at).getTime()
+      );
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(sorted),
+      });
+      return;
+    }
+    if (method === 'POST') {
+      const body = JSON.parse(route.request().postData() || '{}') as {
+        noted_at: string;
+        text: string;
+      };
+      const row = {
+        id: 'mock-note-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+        noted_at: body.noted_at,
+        text: body.text,
+      };
+      notesRows.push(row);
+      await route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify([row]),
+      });
+      return;
+    }
+    if (method === 'DELETE') {
+      const idMatch = url.searchParams.get('id');
+      const id = idMatch?.replace(/^eq\./, '') ?? '';
+      const idx = notesRows.findIndex((n) => n.id === id);
+      if (idx >= 0) notesRows.splice(idx, 1);
       await route.fulfill({ status: 204, body: '' });
       return;
     }
@@ -658,16 +706,21 @@ test('service worker file is served at /sw.js and references our shell assets', 
 
 // ─── v1.6 weight surface ────────────────────────────────────────────────────
 
-test('home screen shows the ⚖ Weight sibling button next to ➕ Meal', async ({ page }) => {
+test('home screen shows the ⚖ Weight + 📝 Note sibling buttons next to ➕ Meal', async ({
+  page,
+}) => {
   await expect(page.locator('#add-meal-btn')).toBeVisible();
   await expect(page.locator('#add-weight-btn')).toBeVisible();
+  // v1.8: Notes is always-on (sibling to meals/weight). Notes captures
+  // app-meta thoughts she was previously misrouting into meals.description.
+  await expect(page.locator('#add-note-btn')).toBeVisible();
   // Cooked button is hidden by default and only appears once she has at least
   // one cook session in history (2026-05-27 audit: avoid surfacing an unused
   // affordance during the data-gathering phase).
   await expect(page.locator('#add-cook-btn')).toHaveCount(0);
-  // The two visible pills sit in the same .quick-actions container.
+  // Three always-on pills (meal + weight + note); cook is conditional.
   const siblings = page.locator('.quick-actions .quick-action');
-  await expect(siblings).toHaveCount(2);
+  await expect(siblings).toHaveCount(3);
 });
 
 test('Cooked button appears once a cook session exists', async ({ page }) => {
@@ -686,8 +739,9 @@ test('Cooked button appears once a cook session exists', async ({ page }) => {
   });
   await page.reload();
   await expect(page.locator('#add-cook-btn')).toBeVisible();
+  // 4 pills now: meal + cook + weight + note.
   const siblings = page.locator('.quick-actions .quick-action');
-  await expect(siblings).toHaveCount(3);
+  await expect(siblings).toHaveCount(4);
 });
 
 test('Weight button opens the weight sheet with chip row + kg input + notes', async ({ page }) => {
@@ -760,4 +814,66 @@ test('weight notes save and surface on the card', async ({ page }) => {
 
 test('Weight section shows an empty-state hint when no entries exist', async ({ page }) => {
   await expect(page.locator('.weight-section .today-empty')).toContainText(/No weight entries/i);
+});
+
+// ─── v1.8 notes surface ─────────────────────────────────────────────────────
+
+test('Note button opens the note sheet with a focused textarea', async ({ page }) => {
+  await page.locator('#add-note-btn').click();
+  await expect(page.locator('.sheet-panel')).toBeVisible();
+  await expect(page.locator('#sheet-note-text')).toBeVisible();
+  // Save disabled until she writes something.
+  await expect(page.locator('#sheet-note-save')).toBeDisabled();
+});
+
+test('Note save enables once any text is typed', async ({ page }) => {
+  await page.locator('#add-note-btn').click();
+  await page.locator('#sheet-note-text').fill('maybe we should make this just for claud');
+  await expect(page.locator('#sheet-note-save')).toBeEnabled();
+});
+
+test('saving a note shows it in the Notes section on home', async ({ page }) => {
+  await page.locator('#add-note-btn').click();
+  await page.locator('#sheet-note-text').fill('not reporting food, working on the interface');
+  await page.locator('#sheet-note-save').click();
+
+  // Sheet closes, row appears in notes list.
+  await expect(page.locator('.sheet-panel')).toHaveCount(0);
+  const firstRow = page.locator('.notes-section .note-row').first();
+  await expect(firstRow).toBeVisible({ timeout: 5000 });
+  await expect(firstRow.locator('.note-row-text')).toContainText('working on the interface');
+  await expect(page.locator('.toast')).toContainText(/saved/);
+});
+
+test('tapping a note row opens a lightbox with the full text + close', async ({ page }) => {
+  await page.locator('#add-note-btn').click();
+  await page
+    .locator('#sheet-note-text')
+    .fill(
+      'a long thought that should show in full inside the lightbox rather than truncated preview'
+    );
+  await page.locator('#sheet-note-save').click();
+  await page.locator('.notes-section .note-row').first().click();
+  await expect(page.locator('.lightbox')).toBeVisible();
+  await expect(page.locator('.lightbox-desc')).toContainText('a long thought');
+  await expect(page.locator('.lightbox-close')).toBeVisible();
+  await page.locator('.lightbox-close').click();
+  await expect(page.locator('.lightbox')).toHaveCount(0);
+});
+
+test('Notes section shows an empty-state hint when no notes exist', async ({ page }) => {
+  await expect(page.locator('.notes-section .today-empty')).toContainText(/No notes yet/i);
+});
+
+test('Notes survive a page refresh (Supabase round-trip, not local-only)', async ({ page }) => {
+  await page.locator('#add-note-btn').click();
+  await page.locator('#sheet-note-text').fill('persistent thought');
+  await page.locator('#sheet-note-save').click();
+  // Wait for the saved row before reload to ensure POST hit the mocked API.
+  await expect(page.locator('.notes-section .note-row').first()).toBeVisible({ timeout: 5000 });
+
+  await page.reload();
+  const firstRow = page.locator('.notes-section .note-row').first();
+  await expect(firstRow).toBeVisible({ timeout: 5000 });
+  await expect(firstRow.locator('.note-row-text')).toContainText('persistent thought');
 });
