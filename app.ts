@@ -1951,9 +1951,16 @@ function render(): void {
   );
   app.appendChild(header);
 
-  // v1.7 — three quick-action pills: Meal (primary), Cooked (tertiary), Weight (secondary).
-  // Cooked sits between Meal and Weight because it's the closest in topic to Meal.
-  const quick = el('div', { class: 'quick-actions quick-actions-three' });
+  // Quick-action pills — Meal (primary) + Weight (secondary) always shown;
+  // Cooked (tertiary) only when she's already started using cook sessions.
+  // Rationale (2026-05-27 audit): zero cook_sessions logged across the first
+  // 4 days of food-log usage; meanwhile her stated north-star design is "two
+  // sibling pills at the top." Reveal Cooked the moment she has any history,
+  // so the feature is one tap away the second it's relevant — but not earlier.
+  const showCookedBtn = cooks.length > 0;
+  const quick = el('div', {
+    class: showCookedBtn ? 'quick-actions quick-actions-three' : 'quick-actions',
+  });
   const addMealBtn = el(
     'button',
     {
@@ -1965,17 +1972,6 @@ function render(): void {
     [el('span', { class: 'quick-icon', 'aria-hidden': 'true' }, ['➕']), ' Meal']
   );
   addMealBtn.addEventListener('click', () => openSheetForNew());
-  const addCookBtn = el(
-    'button',
-    {
-      class: 'quick-action quick-action-tertiary',
-      type: 'button',
-      id: 'add-cook-btn',
-      'aria-label': 'Log a cook session',
-    },
-    [el('span', { class: 'quick-icon', 'aria-hidden': 'true' }, ['🍳']), ' Cooked']
-  );
-  addCookBtn.addEventListener('click', () => openCookSheetForNew());
   const addWeightBtn = el(
     'button',
     {
@@ -1988,7 +1984,20 @@ function render(): void {
   );
   addWeightBtn.addEventListener('click', () => openWeightSheetForNew());
   quick.appendChild(addMealBtn);
-  quick.appendChild(addCookBtn);
+  if (showCookedBtn) {
+    const addCookBtn = el(
+      'button',
+      {
+        class: 'quick-action quick-action-tertiary',
+        type: 'button',
+        id: 'add-cook-btn',
+        'aria-label': 'Log a cook session',
+      },
+      [el('span', { class: 'quick-icon', 'aria-hidden': 'true' }, ['🍳']), ' Cooked']
+    );
+    addCookBtn.addEventListener('click', () => openCookSheetForNew());
+    quick.appendChild(addCookBtn);
+  }
   quick.appendChild(addWeightBtn);
   app.appendChild(quick);
 

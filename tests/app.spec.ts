@@ -55,6 +55,13 @@ async function mockSupabase(page: Page): Promise<void> {
     weight_kg: number;
     notes: string | null;
   }> = [];
+  const cookSessions: Array<{
+    id: string;
+    cooked_at: string;
+    description: string | null;
+    total_portions: number | null;
+    notes: string | null;
+  }> = [];
 
   await page.route(/supabase\.co\/rest\/v1\/meals(\?.*)?$/, async (route: Route) => {
     const method = route.request().method();
@@ -217,6 +224,72 @@ async function mockSupabase(page: Page): Promise<void> {
       const id = idMatch?.replace(/^eq\./, '') ?? '';
       const idx = weightLog.findIndex((w) => w.id === id);
       if (idx >= 0) weightLog.splice(idx, 1);
+      await route.fulfill({ status: 204, body: '' });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.route(/supabase\.co\/rest\/v1\/cook_sessions(\?.*)?$/, async (route: Route) => {
+    const method = route.request().method();
+    const url = new URL(route.request().url());
+    if (method === 'GET') {
+      const sorted = [...cookSessions].sort(
+        (a, b) => new Date(b.cooked_at).getTime() - new Date(a.cooked_at).getTime()
+      );
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(sorted),
+      });
+      return;
+    }
+    if (method === 'POST') {
+      const body = JSON.parse(route.request().postData() || '{}') as {
+        cooked_at: string;
+        description: string | null;
+        total_portions: number | null;
+        notes: string | null;
+      };
+      const row = {
+        id: 'mock-cook-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+        cooked_at: body.cooked_at,
+        description: body.description ?? null,
+        total_portions: body.total_portions ?? null,
+        notes: body.notes ?? null,
+      };
+      cookSessions.push(row);
+      await route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify([row]),
+      });
+      return;
+    }
+    if (method === 'PATCH') {
+      const idMatch = url.searchParams.get('id');
+      const id = idMatch?.replace(/^eq\./, '') ?? '';
+      const body = JSON.parse(route.request().postData() || '{}') as Partial<{
+        cooked_at: string;
+        description: string | null;
+        total_portions: number | null;
+        notes: string | null;
+      }>;
+      const target = cookSessions.find((c) => c.id === id);
+      if (target) {
+        if (body.cooked_at !== undefined) target.cooked_at = body.cooked_at;
+        if (body.description !== undefined) target.description = body.description;
+        if (body.total_portions !== undefined) target.total_portions = body.total_portions;
+        if (body.notes !== undefined) target.notes = body.notes;
+      }
+      await route.fulfill({ status: 204, body: '' });
+      return;
+    }
+    if (method === 'DELETE') {
+      const idMatch = url.searchParams.get('id');
+      const id = idMatch?.replace(/^eq\./, '') ?? '';
+      const idx = cookSessions.findIndex((c) => c.id === id);
+      if (idx >= 0) cookSessions.splice(idx, 1);
       await route.fulfill({ status: 204, body: '' });
       return;
     }
@@ -588,10 +661,33 @@ test('service worker file is served at /sw.js and references our shell assets', 
 test('home screen shows the ⚖ Weight sibling button next to ➕ Meal', async ({ page }) => {
   await expect(page.locator('#add-meal-btn')).toBeVisible();
   await expect(page.locator('#add-weight-btn')).toBeVisible();
-  await expect(page.locator('#add-cook-btn')).toBeVisible(); // v1.7
-  // They sit in the same .quick-actions container.
+  // Cooked button is hidden by default and only appears once she has at least
+  // one cook session in history (2026-05-27 audit: avoid surfacing an unused
+  // affordance during the data-gathering phase).
+  await expect(page.locator('#add-cook-btn')).toHaveCount(0);
+  // The two visible pills sit in the same .quick-actions container.
   const siblings = page.locator('.quick-actions .quick-action');
-  await expect(siblings).toHaveCount(3); // v1.7: Meal + Cooked + Weight
+  await expect(siblings).toHaveCount(2);
+});
+
+test('Cooked button appears once a cook session exists', async ({ page }) => {
+  // Seed a cook session through the mocked API, then reload to re-fetch.
+  await page.evaluate(async () => {
+    await fetch('https://hpiyvnfhoqnnnotrmwaz.supabase.co/rest/v1/cook_sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        cooked_at: new Date().toISOString(),
+        description: 'roast chicken',
+        total_portions: 4,
+        notes: null,
+      }),
+    });
+  });
+  await page.reload();
+  await expect(page.locator('#add-cook-btn')).toBeVisible();
+  const siblings = page.locator('.quick-actions .quick-action');
+  await expect(siblings).toHaveCount(3);
 });
 
 test('Weight button opens the weight sheet with chip row + kg input + notes', async ({ page }) => {
