@@ -362,6 +362,22 @@ let notesHistoryOpen = false;
 // to whatever the most-recent row used; falls back to 'kg' on empty history.
 let weightDisplayUnit: WeightUnit = 'kg';
 
+// v1.9 — voice speed lane state. Single global state machine; the long-press
+// gesture lives on the ➕ Meal pill only (not generalized — per the experiment
+// scope rules in the 2026-05-27 dossier).
+interface TalkState {
+  active: boolean;
+  transcript: string;
+  cancelling: boolean; // user dragged off the button — release will abort
+  recognition: SpeechRecognitionLike | null;
+}
+const talk: TalkState = {
+  active: false,
+  transcript: '',
+  cancelling: false,
+  recognition: null,
+};
+
 // ─── Supabase URLs ──────────────────────────────────────────────────────────
 
 function publicPhotoUrl(path: string): string {
@@ -1931,6 +1947,359 @@ function pickableCooks(): CookSession[] {
     .sort((a, b) => new Date(b.cooked_at).getTime() - new Date(a.cooked_at).getTime());
 }
 
+// ─── Voice speed lane (v1.9) ────────────────────────────────────────────────
+//
+// Experiment #1 from the 2026-05-27 UX research dossier:
+//   Long-press ➕ Meal → recording starts immediately (Web Speech API live
+//   transcript) → release → meal saved with description=transcript,
+//   eaten_at=now, no photo. Tap (short press) keeps the existing sheet path.
+//
+// Scope discipline (per dossier): long-press only on Meal. No streaks, no
+// settings, no photo capture. If she wants to edit, she taps the saved meal
+// afterward. Fallback when SpeechRecognition is unavailable: open the existing
+// meal sheet (same as a regular tap).
+//
+// SpeechRecognition is not in lib.dom.d.ts by default (it's a draft-spec /
+// vendor-prefixed API), so we shim minimal types ourselves.
+
+interface SpeechRecognitionEventLike {
+  resultIndex: number;
+  results: ArrayLike<{
+    isFinal: boolean;
+    0: { transcript: string };
+  }>;
+}
+
+interface SpeechRecognitionLike {
+  lang: string;
+  continuous: boolean;
+  interimResults: boolean;
+  maxAlternatives: number;
+  onresult: ((ev: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((ev: { error?: string }) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+}
+
+interface SpeechRecognitionCtorLike {
+  new (): SpeechRecognitionLike;
+}
+
+function getSpeechRecognitionCtor(): SpeechRecognitionCtorLike | null {
+  // Browser exposes either `SpeechRecognition` (Firefox draft) or
+  // `webkitSpeechRecognition` (Chrome/Safari). Either is fine for our needs.
+  const w = window as unknown as {
+    SpeechRecognition?: SpeechRecognitionCtorLike;
+    webkitSpeechRecognition?: SpeechRecognitionCtorLike;
+  };
+  return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
+}
+
+function detectTalkLang(): string {
+  // Default to the browser's reported language. Hebrew RTL users still get
+  // en-US-ish recognition if the OS reports English; if she's set Hebrew in
+  // the OS we honor it. This is intentionally minimal — no in-app toggle per
+  // the dossier's "no settings" rule.
+  const lang = (navigator.language || 'en-US').trim();
+  return lang.length > 0 ? lang : 'en-US';
+}
+
+// Long-press threshold. Configurable here so it's easy to tune as we learn
+// from real usage. 350ms is the dossier's recommended ~300-400ms middle.
+const LONG_PRESS_MS = 350;
+// Drag-cancel threshold in px from the original press point. Larger than a
+// typical taptic-feedback wobble but small enough that a deliberate drag-off
+// reliably aborts.
+const TALK_CANCEL_RADIUS = 60;
+
+function talkPanelEl(): HTMLElement | null {
+  return $('.talk-panel');
+}
+
+function renderTalkPanel(): void {
+  // Render-as-needed: when talk.active toggles on we create the panel; when
+  // it toggles off we remove it. Keeps the global render() free of yet
+  // another conditional — voice mode lives outside the standard surface
+  // hierarchy because it floats over everything.
+  let panel = talkPanelEl();
+  if (!talk.active) {
+    if (panel) {
+      panel.classList.remove('visible');
+      // Remove after the fade-out completes so the transition runs.
+      setTimeout(() => panel?.remove(), 220);
+    }
+    return;
+  }
+  if (!panel) {
+    panel = el('div', {
+      class: 'talk-panel',
+      role: 'status',
+      'aria-live': 'polite',
+      'aria-label': 'Voice capture',
+    });
+    panel.appendChild(
+      el('div', { class: 'talk-panel-head' }, [
+        el('span', { class: 'talk-pulse', 'aria-hidden': 'true' }),
+        el('span', { class: 'talk-panel-head-label' }, ['Listening']),
+      ])
+    );
+    panel.appendChild(el('div', { class: 'talk-panel-transcript' }));
+    panel.appendChild(
+      el('div', { class: 'talk-panel-hint' }, ['release to save · drag off to cancel'])
+    );
+    document.body.appendChild(panel);
+    // Force a layout pass before adding `.visible` so the slide-in animates.
+    requestAnimationFrame(() => panel?.classList.add('visible'));
+  }
+  const transcriptNode = panel.querySelector('.talk-panel-transcript') as HTMLElement | null;
+  if (transcriptNode) {
+    if (talk.transcript.trim().length === 0) {
+      transcriptNode.textContent = '…';
+      transcriptNode.classList.add('talk-panel-transcript-empty');
+    } else {
+      transcriptNode.textContent = talk.transcript;
+      transcriptNode.classList.remove('talk-panel-transcript-empty');
+    }
+  }
+  panel.classList.toggle('cancelling', talk.cancelling);
+}
+
+function startTalk(button: HTMLButtonElement): void {
+  const Ctor = getSpeechRecognitionCtor();
+  if (!Ctor) {
+    // Graceful fallback: open the existing sheet so she's not stuck.
+    openSheetForNew();
+    return;
+  }
+  // If a previous recognition session is hanging around, abort it first.
+  if (talk.recognition) {
+    try {
+      talk.recognition.abort();
+    } catch {
+      // best-effort
+    }
+    talk.recognition = null;
+  }
+  const rec = new Ctor();
+  rec.lang = detectTalkLang();
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.maxAlternatives = 1;
+  rec.onresult = (ev: SpeechRecognitionEventLike) => {
+    let out = '';
+    for (let i = 0; i < ev.results.length; i++) {
+      const r = ev.results[i];
+      out += r[0].transcript;
+    }
+    talk.transcript = out;
+    renderTalkPanel();
+  };
+  rec.onerror = (ev) => {
+    // Most "no-speech" / "aborted" errors are not user-facing problems.
+    // Log + continue; release-handler decides whether to save what we have.
+    console.warn('[food-log] speech recognition error:', ev.error ?? '(unknown)');
+  };
+  rec.onend = () => {
+    // Recognition can end on its own (silence timeout). If the user is still
+    // holding, we keep the panel up so the press-state stays consistent —
+    // the user releasing is what saves.
+  };
+  talk.recognition = rec;
+  talk.active = true;
+  talk.transcript = '';
+  talk.cancelling = false;
+  button.classList.add('holding-to-talk');
+  renderTalkPanel();
+  try {
+    rec.start();
+  } catch (err) {
+    console.warn('[food-log] speech start failed:', err);
+    endTalk(button, /* save= */ false);
+  }
+}
+
+function endTalk(button: HTMLButtonElement, save: boolean): void {
+  const transcript = talk.transcript.trim();
+  const rec = talk.recognition;
+  // Wipe state first so renderTalkPanel() removes the floating panel.
+  talk.active = false;
+  talk.cancelling = false;
+  talk.recognition = null;
+  button.classList.remove('holding-to-talk');
+  renderTalkPanel();
+  if (rec) {
+    try {
+      rec.stop();
+    } catch {
+      // best-effort
+    }
+  }
+  if (!save) {
+    if (transcript.length > 0) toast('cancelled', 1200);
+    return;
+  }
+  if (transcript.length === 0) {
+    // Silent abort: no row written. Per dossier: don't write empty meals.
+    return;
+  }
+  void saveVoiceMeal(transcript);
+}
+
+async function saveVoiceMeal(description: string): Promise<void> {
+  const eatenAt = new Date().toISOString();
+  const localId = uuid();
+  const optimistic: Meal = {
+    id: localId,
+    eaten_at: eatenAt,
+    description,
+    photos: [],
+    cook_session_id: null,
+    portions_consumed: null,
+    pending: true,
+  };
+  meals.unshift(optimistic);
+  sortMeals();
+  render();
+  toast('saving…');
+  try {
+    const saved = await saveNewMealOnline(eatenAt, description, null, null, []);
+    meals = meals.filter((m) => m.id !== localId);
+    meals.unshift(saved);
+    sortMeals();
+    render();
+    toast('saved ✓');
+  } catch (err) {
+    console.warn('[food-log] voice meal save failed, queueing:', err);
+    await queuePendingMeal({
+      localId,
+      eaten_at: eatenAt,
+      description,
+      photos: [],
+    });
+    toast('saved offline — will upload later', 2500);
+  } finally {
+    updateQueueBanner();
+  }
+}
+
+// Attach long-press + tap-fallback gesture listeners to the Meal pill. Called
+// once per render of the pill, since render() rebuilds the DOM. Tap (short
+// press) → openSheetForNew(); long-press → startTalk() and release-to-save.
+function wireMealLongPress(button: HTMLButtonElement): void {
+  // If SpeechRecognition isn't available, fall back to a plain click handler
+  // (existing behavior). Don't even attempt the long-press path.
+  if (!getSpeechRecognitionCtor()) {
+    button.addEventListener('click', () => openSheetForNew());
+    return;
+  }
+
+  let pressTimer: ReturnType<typeof setTimeout> | null = null;
+  let pressedAt = 0;
+  let triggered = false;
+  let originX = 0;
+  let originY = 0;
+  let activePointerId: number | null = null;
+
+  const clearTimer = (): void => {
+    if (pressTimer !== null) {
+      clearTimeout(pressTimer);
+      pressTimer = null;
+    }
+  };
+
+  const onPointerDown = (ev: PointerEvent): void => {
+    // Ignore secondary buttons (right-click etc).
+    if (ev.button !== undefined && ev.button !== 0) return;
+    pressedAt = Date.now();
+    triggered = false;
+    originX = ev.clientX;
+    originY = ev.clientY;
+    activePointerId = ev.pointerId;
+    try {
+      button.setPointerCapture(ev.pointerId);
+    } catch {
+      // best-effort — capture lets us track drag-off outside the button
+    }
+    clearTimer();
+    pressTimer = setTimeout(() => {
+      triggered = true;
+      pressTimer = null;
+      startTalk(button);
+    }, LONG_PRESS_MS);
+  };
+
+  const onPointerMove = (ev: PointerEvent): void => {
+    if (activePointerId === null || ev.pointerId !== activePointerId) return;
+    const dx = ev.clientX - originX;
+    const dy = ev.clientY - originY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (!triggered) {
+      // Moved too far before the long-press triggered: treat as a scroll
+      // gesture and bail. (Threshold larger than a normal tap wobble.)
+      if (dist > TALK_CANCEL_RADIUS) {
+        clearTimer();
+        activePointerId = null;
+      }
+      return;
+    }
+    // Already in talk mode: dragging off marks the gesture as cancelling.
+    const wasCancel = talk.cancelling;
+    talk.cancelling = dist > TALK_CANCEL_RADIUS;
+    if (wasCancel !== talk.cancelling) renderTalkPanel();
+  };
+
+  const onPointerUp = (ev: PointerEvent): void => {
+    if (activePointerId !== null && ev.pointerId !== activePointerId) return;
+    activePointerId = null;
+    try {
+      button.releasePointerCapture(ev.pointerId);
+    } catch {
+      // best-effort
+    }
+    if (!triggered) {
+      // Short press → existing tap behavior (open the sheet).
+      clearTimer();
+      // Avoid double-open if a synthetic click fires after this.
+      ev.preventDefault();
+      openSheetForNew();
+      return;
+    }
+    // Long-press release: save unless the user dragged off.
+    endTalk(button, /* save= */ !talk.cancelling);
+  };
+
+  const onPointerCancel = (ev: PointerEvent): void => {
+    if (activePointerId !== null && ev.pointerId !== activePointerId) return;
+    activePointerId = null;
+    clearTimer();
+    if (triggered) endTalk(button, /* save= */ false);
+  };
+
+  button.addEventListener('pointerdown', onPointerDown);
+  button.addEventListener('pointermove', onPointerMove);
+  button.addEventListener('pointerup', onPointerUp);
+  button.addEventListener('pointercancel', onPointerCancel);
+  // Suppress the synthetic click after a long-press release so we don't also
+  // open the sheet right after saving the voice meal.
+  button.addEventListener('click', (ev) => {
+    if (triggered) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      // Reset for the next gesture cycle.
+      triggered = false;
+    }
+    // If !triggered we already called openSheetForNew() from pointerup, and
+    // we don't want to call it again here. Use pressedAt as a recency guard.
+    else if (Date.now() - pressedAt > 50) {
+      // Synthetic click outside of a recent pointerup — keyboard activation,
+      // assistive tech. Fall through to the standard sheet path.
+      openSheetForNew();
+    }
+  });
+}
+
 // ─── Photo picker (inside sheet) ────────────────────────────────────────────
 
 function addDraftPhoto(file: File): void {
@@ -2187,11 +2556,14 @@ function render(): void {
       class: 'quick-action quick-action-primary',
       type: 'button',
       id: 'add-meal-btn',
-      'aria-label': 'Add a meal',
+      'aria-label': 'Add a meal — tap to type, long-press to dictate',
     },
     [el('span', { class: 'quick-icon', 'aria-hidden': 'true' }, ['➕']), ' Meal']
-  );
-  addMealBtn.addEventListener('click', () => openSheetForNew());
+  ) as HTMLButtonElement;
+  // v1.9: long-press starts voice capture (save on release). Short tap keeps
+  // the existing sheet flow. Falls back to plain tap if SpeechRecognition is
+  // unavailable. See `wireMealLongPress`.
+  wireMealLongPress(addMealBtn);
   const addWeightBtn = el(
     'button',
     {
