@@ -786,7 +786,8 @@ test('saving a weight shows it in the Weight section on home', async ({ page }) 
   await expect(page.locator('.sheet-panel')).toHaveCount(0);
   const firstRow = page.locator('.weight-list .weight-row').first();
   await expect(firstRow).toBeVisible({ timeout: 5000 });
-  await expect(firstRow.locator('.weight-row-kg')).toHaveText('64.3 kg');
+  // Default display unit is lb (Allison weighs in lb) — entered value round-trips as lb.
+  await expect(firstRow.locator('.weight-row-kg')).toHaveText('64.3 lb');
   await expect(page.locator('.toast')).toContainText(/saved/);
 });
 

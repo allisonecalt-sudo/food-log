@@ -359,8 +359,10 @@ let noteSheet: NoteSheetState | null = null;
 let weightHistoryOpen = false;
 let notesHistoryOpen = false;
 // Last-used display unit for weight. New entries default to this. Initialized
-// to whatever the most-recent row used; falls back to 'kg' on empty history.
-let weightDisplayUnit: WeightUnit = 'kg';
+// to whatever the most-recent row used; falls back to 'lb' on empty history
+// (Allison weighs in lb — May 31 2026). weight_kg stays canonical kg; unit
+// only drives display/entry round-trip.
+let weightDisplayUnit: WeightUnit = 'lb';
 
 // ─── Supabase URLs ──────────────────────────────────────────────────────────
 
