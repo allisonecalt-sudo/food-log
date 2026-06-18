@@ -767,7 +767,7 @@ test('service worker file is served at /sw.js and references our shell assets', 
   const res = await page.request.get('/sw.js');
   expect(res.ok()).toBeTruthy();
   const body = await res.text();
-  expect(body).toContain('food-log-v2-1');
+  expect(body).toContain('food-log-v2-2');
   expect(body).toContain('./dist/app.js');
   expect(body).toContain('./manifest.webmanifest');
 });
@@ -885,6 +885,31 @@ test('weight notes save and surface on the card', async ({ page }) => {
 
 test('Weight section shows an empty-state hint when no entries exist', async ({ page }) => {
   await expect(page.locator('.weight-section .today-empty')).toContainText(/No weight entries/i);
+});
+
+test('a maintenance/correction note shows a quiet "edited" marker, not raw audit text', async ({
+  page,
+}) => {
+  // Seed a row whose note is Claude-written audit text (the kind that was
+  // cluttering her clean home view).
+  await page.evaluate(async () => {
+    await fetch('https://hpiyvnfhoqnnnotrmwaz.supabase.co/rest/v1/weight_log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        measured_at: new Date().toISOString(),
+        weight_kg: 93.7,
+        notes: 'Corrected 2026-06-16: scale read 209.88 lb; stored canonical 95.20 kg + unit=lb.',
+      }),
+    });
+  });
+  await page.reload();
+  const firstRow = page.locator('.weight-list .weight-row').first();
+  await expect(firstRow).toBeVisible({ timeout: 5000 });
+  // The raw audit string is NOT in the clean home list…
+  await expect(firstRow.locator('.weight-row-notes')).toHaveCount(0);
+  // …but a quiet "edited" marker signals there's a note (full text stays in detail).
+  await expect(firstRow.locator('.weight-row-edited')).toHaveText('edited');
 });
 
 // ─── v1.8 notes surface ─────────────────────────────────────────────────────

@@ -7,7 +7,7 @@
 //     app's IndexedDB layer (see app.ts queuePending / drainQueue), not here.
 //   - Everything else: passthrough.
 
-const VERSION = 'food-log-v2-1';
+const VERSION = 'food-log-v2-2';
 const SHELL_CACHE = `${VERSION}-shell`;
 const RUNTIME_CACHE = `${VERSION}-runtime`;
 

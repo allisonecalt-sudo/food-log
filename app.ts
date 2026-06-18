@@ -2385,6 +2385,14 @@ function renderMealCard(m: Meal): HTMLElement {
   return card;
 }
 
+// A maintenance/correction note is Claude-written audit text (e.g. "Corrected
+// 2026-06-16: scale read 209.88 lb; stored canonical 95.20 kg…"), not her own
+// words. We keep it in the DB + the detail view, but it shouldn't clutter the
+// clean home list — show a quiet "edited" marker there instead.
+function isAuditNote(note: string): boolean {
+  return /^\s*(corrected\b|originally entered\b)/i.test(note);
+}
+
 function renderWeightRow(w: WeightEntry): HTMLElement {
   const label = formatWeight(w.weight_kg, w.unit);
   const row = el('button', {
@@ -2401,8 +2409,13 @@ function renderWeightRow(w: WeightEntry): HTMLElement {
   if (w.pending) {
     meta.appendChild(el('span', { class: 'weight-row-pending' }, ['queued']));
   }
+  const hasNote = !!(w.notes && w.notes.trim() !== '');
+  // Maintenance/correction notes get a quiet marker, not the raw audit string.
+  if (hasNote && w.notes && isAuditNote(w.notes)) {
+    meta.appendChild(el('span', { class: 'weight-row-edited' }, ['edited']));
+  }
   row.appendChild(meta);
-  if (w.notes && w.notes.trim() !== '') {
+  if (hasNote && w.notes && !isAuditNote(w.notes)) {
     row.appendChild(el('span', { class: 'weight-row-notes' }, [previewDescription(w.notes)]));
   }
   row.addEventListener('click', () => openWeightLightbox(w));

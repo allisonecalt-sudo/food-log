@@ -1405,7 +1405,7 @@ button {
   background: var(--bg-elev-2);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
-  padding: 10px 12px;
+  padding: 9px 12px;
   font-family: inherit;
   transition:
     background var(--dur-base) ease,
@@ -1443,10 +1443,16 @@ button {
   border-color: #7f6347;
 }
 
+/* Label + hint sit on ONE line (was stacked) so the 7-row selector — and the
+ * whole bowel sheet — is shorter and reachable with little/no scroll. Wraps
+ * gracefully if a label+hint is ever too wide for the row. */
 .bristol-text {
   display: flex;
-  flex-direction: column;
-  gap: 1px;
+  flex-direction: row;
+  align-items: baseline;
+  flex-wrap: wrap;
+  column-gap: 8px;
+  row-gap: 1px;
   min-width: 0;
 }
 
@@ -1461,6 +1467,16 @@ button {
   color: var(--text-dim);
   text-transform: uppercase;
   letter-spacing: var(--track-label);
+}
+
+/* Quiet marker on a weight row whose note is Claude maintenance/correction text
+ * (kept in the detail view, but not cluttering the clean home list). */
+.weight-row-edited {
+  font-size: var(--font-micro);
+  color: var(--text-dim-2);
+  text-transform: uppercase;
+  letter-spacing: var(--track-label);
+  font-style: italic;
 }
 
 /* --- Bowel section on home ----------------------------------------------- */
