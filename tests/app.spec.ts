@@ -767,33 +767,33 @@ test('service worker file is served at /sw.js and references our shell assets', 
   const res = await page.request.get('/sw.js');
   expect(res.ok()).toBeTruthy();
   const body = await res.text();
-  expect(body).toContain('food-log-v2-2');
+  expect(body).toContain('food-log-v2-3');
   expect(body).toContain('./dist/app.js');
   expect(body).toContain('./manifest.webmanifest');
 });
 
 // ─── v1.6 weight surface ────────────────────────────────────────────────────
 
-test('home screen shows the ⚖ Weight + 📝 Note sibling buttons next to ➕ Meal', async ({
+test('home top shows Meal · Weight · Bowel + a More disclosure; Note lives behind it', async ({
   page,
 }) => {
+  // v1.9.1: the everyday captures are the 3 visible primaries.
   await expect(page.locator('#add-meal-btn')).toBeVisible();
   await expect(page.locator('#add-weight-btn')).toBeVisible();
-  // v1.8: Notes is always-on (sibling to meals/weight). Notes captures
-  // app-meta thoughts she was previously misrouting into meals.description.
-  await expect(page.locator('#add-note-btn')).toBeVisible();
-  // v1.9: Bowel is always-on too (Bristol Stool Scale, flare data).
   await expect(page.locator('#add-bowel-btn')).toBeVisible();
-  // Cooked button is hidden by default and only appears once she has at least
-  // one cook session in history (2026-05-27 audit: avoid surfacing an unused
-  // affordance during the data-gathering phase).
+  await expect(page.locator('#more-actions-btn')).toBeVisible();
+  // Note + Cooked live behind More — not even in the DOM until it's opened.
+  await expect(page.locator('#add-note-btn')).toHaveCount(0);
   await expect(page.locator('#add-cook-btn')).toHaveCount(0);
-  // Four always-on pills (meal + weight + note + bowel); cook is conditional.
-  const siblings = page.locator('.quick-actions .quick-action');
-  await expect(siblings).toHaveCount(4);
+  // Four pills collapsed: Meal + Weight + Bowel + More.
+  await expect(page.locator('.quick-actions .quick-action')).toHaveCount(4);
+  // Tapping More reveals Note (Cooked stays conditional on cook history).
+  await page.locator('#more-actions-btn').click();
+  await expect(page.locator('#add-note-btn')).toBeVisible();
+  await expect(page.locator('.quick-actions .quick-action')).toHaveCount(5);
 });
 
-test('Cooked button appears once a cook session exists', async ({ page }) => {
+test('Cooked appears under More once a cook session exists', async ({ page }) => {
   // Seed a cook session through the mocked API, then reload to re-fetch.
   await page.evaluate(async () => {
     await fetch('https://hpiyvnfhoqnnnotrmwaz.supabase.co/rest/v1/cook_sessions', {
@@ -808,10 +808,12 @@ test('Cooked button appears once a cook session exists', async ({ page }) => {
     });
   });
   await page.reload();
+  // Still hidden until More is opened (it's a secondary surface now).
+  await expect(page.locator('#add-cook-btn')).toHaveCount(0);
+  await page.locator('#more-actions-btn').click();
   await expect(page.locator('#add-cook-btn')).toBeVisible();
-  // 5 pills now: meal + cook + weight + note + bowel.
-  const siblings = page.locator('.quick-actions .quick-action');
-  await expect(siblings).toHaveCount(5);
+  // 6 pills open with a cook: Meal + Weight + Bowel + More + Note + Cooked.
+  await expect(page.locator('.quick-actions .quick-action')).toHaveCount(6);
 });
 
 test('Weight button opens the weight sheet with chip row + kg input + notes', async ({ page }) => {
@@ -915,6 +917,7 @@ test('a maintenance/correction note shows a quiet "edited" marker, not raw audit
 // ─── v1.8 notes surface ─────────────────────────────────────────────────────
 
 test('Note button opens the note sheet with a focused textarea', async ({ page }) => {
+  await page.locator('#more-actions-btn').click();
   await page.locator('#add-note-btn').click();
   await expect(page.locator('.sheet-panel')).toBeVisible();
   await expect(page.locator('#sheet-note-text')).toBeVisible();
@@ -923,12 +926,14 @@ test('Note button opens the note sheet with a focused textarea', async ({ page }
 });
 
 test('Note save enables once any text is typed', async ({ page }) => {
+  await page.locator('#more-actions-btn').click();
   await page.locator('#add-note-btn').click();
   await page.locator('#sheet-note-text').fill('maybe we should make this just for claud');
   await expect(page.locator('#sheet-note-save')).toBeEnabled();
 });
 
 test('saving a note shows it in the Notes section on home', async ({ page }) => {
+  await page.locator('#more-actions-btn').click();
   await page.locator('#add-note-btn').click();
   await page.locator('#sheet-note-text').fill('not reporting food, working on the interface');
   await page.locator('#sheet-note-save').click();
@@ -942,6 +947,7 @@ test('saving a note shows it in the Notes section on home', async ({ page }) => 
 });
 
 test('tapping a note row opens a lightbox with the full text + close', async ({ page }) => {
+  await page.locator('#more-actions-btn').click();
   await page.locator('#add-note-btn').click();
   await page
     .locator('#sheet-note-text')
@@ -962,6 +968,7 @@ test('Notes section shows an empty-state hint when no notes exist', async ({ pag
 });
 
 test('Notes survive a page refresh (Supabase round-trip, not local-only)', async ({ page }) => {
+  await page.locator('#more-actions-btn').click();
   await page.locator('#add-note-btn').click();
   await page.locator('#sheet-note-text').fill('persistent thought');
   await page.locator('#sheet-note-save').click();

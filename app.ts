@@ -427,6 +427,9 @@ let bowelSheet: BowelSheetState | null = null;
 let weightHistoryOpen = false;
 let notesHistoryOpen = false;
 let bowelHistoryOpen = false;
+// v1.9.1 — the "More" pill disclosure (Note + Cooked live behind it). Default
+// collapsed so the top is the 3 everyday captures (Meal/Weight/Bowel) + More.
+let moreActionsOpen = false;
 // Last-used display unit for weight. New entries default to this. Initialized
 // to whatever the most-recent row used; falls back to 'lb' on empty history
 // (Allison weighs in lb — May 31 2026). weight_kg stays canonical kg; unit
@@ -2514,22 +2517,19 @@ function render(): void {
   );
   app.appendChild(header);
 
-  // Quick-action pills — Meal (primary) + Weight (secondary) always shown;
-  // Notes (quaternary) always shown — meta-thoughts about the app kept leaking
-  // into meal descriptions, the pill gives them a home;
-  // Cooked (tertiary) only when she's already started using cook sessions.
-  // Rationale (2026-05-27 audit): zero cook_sessions logged across the first
-  // 4 days of food-log usage; meanwhile her stated north-star design is "two
-  // sibling pills at the top." Reveal Cooked the moment she has any history,
-  // so the feature is one tap away the second it's relevant — but not earlier.
-  // Notes (v1.8) ships always-on because the need pre-dates the data: she was
-  // ALREADY misusing meal.description to hold app-meta thoughts.
+  // Quick-action pills — restructured 2026-06-18 (surface-creep pullback to her
+  // "two sibling pills" north-star). VISIBLE primaries = the everyday captures:
+  // Meal · Weight · Bowel. The less-frequent surfaces (Note + the conditional
+  // Cooked) live behind a quiet "More" disclosure, so the top stays calm WITHOUT
+  // making any frequent capture cost an extra tap. This also caps future creep:
+  // a new surface goes under More, not as another top-level colored pill.
   const showCookedBtn = cooks.length > 0;
-  // Always-on pills: Meal, Weight, Note, Bowel (4). Cooked is conditional → up
-  // to 5. 4 → calm 2×2 grid; 5 → 3-then-2 wrap. Both stay legible at 412px.
-  const pillCount = 4 + (showCookedBtn ? 1 : 0);
+  const secondaryCount = 1 /* Note */ + (showCookedBtn ? 1 : 0);
+  // 3 primaries + the More toggle (= 4 collapsed), plus secondaries when open.
+  const pillCount = 4 + (moreActionsOpen ? secondaryCount : 0);
+  // 4 → calm 2×2 grid; 5–6 → 3-per-row wrap. Both stay legible at 412px.
   const pillClass =
-    pillCount === 5 ? 'quick-actions quick-actions-five' : 'quick-actions quick-actions-four';
+    pillCount >= 5 ? 'quick-actions quick-actions-five' : 'quick-actions quick-actions-four';
   const quick = el('div', { class: pillClass });
   const addMealBtn = el(
     'button',
@@ -2553,17 +2553,6 @@ function render(): void {
     [el('span', { class: 'quick-icon', 'aria-hidden': 'true' }, ['⚖']), ' Weight']
   );
   addWeightBtn.addEventListener('click', () => openWeightSheetForNew());
-  const addNoteBtn = el(
-    'button',
-    {
-      class: 'quick-action quick-action-quaternary',
-      type: 'button',
-      id: 'add-note-btn',
-      'aria-label': 'Add a note',
-    },
-    [el('span', { class: 'quick-icon', 'aria-hidden': 'true' }, ['📝']), ' Note']
-  );
-  addNoteBtn.addEventListener('click', () => openNoteSheetForNew());
   const addBowelBtn = el(
     'button',
     {
@@ -2575,24 +2564,57 @@ function render(): void {
     [el('span', { class: 'quick-icon', 'aria-hidden': 'true' }, ['🚽']), ' Bowel']
   );
   addBowelBtn.addEventListener('click', () => openBowelSheetForNew());
+  // Quiet disclosure — neutral styling so it reads as "more options," not a capture.
+  const moreBtn = el(
+    'button',
+    {
+      class: 'quick-action quick-action-more' + (moreActionsOpen ? ' quick-action-more-open' : ''),
+      type: 'button',
+      id: 'more-actions-btn',
+      'aria-expanded': moreActionsOpen ? 'true' : 'false',
+      'aria-label': moreActionsOpen ? 'Fewer actions' : 'More actions',
+    },
+    [
+      el('span', { class: 'quick-icon', 'aria-hidden': 'true' }, [moreActionsOpen ? '–' : '+']),
+      moreActionsOpen ? ' Less' : ' More',
+    ]
+  );
+  moreBtn.addEventListener('click', () => {
+    moreActionsOpen = !moreActionsOpen;
+    render();
+  });
   quick.appendChild(addMealBtn);
-  if (showCookedBtn) {
-    const addCookBtn = el(
+  quick.appendChild(addWeightBtn);
+  quick.appendChild(addBowelBtn);
+  quick.appendChild(moreBtn);
+  if (moreActionsOpen) {
+    const addNoteBtn = el(
       'button',
       {
-        class: 'quick-action quick-action-tertiary',
+        class: 'quick-action quick-action-quaternary',
         type: 'button',
-        id: 'add-cook-btn',
-        'aria-label': 'Log a cook session',
+        id: 'add-note-btn',
+        'aria-label': 'Add a note',
       },
-      [el('span', { class: 'quick-icon', 'aria-hidden': 'true' }, ['🍳']), ' Cooked']
+      [el('span', { class: 'quick-icon', 'aria-hidden': 'true' }, ['📝']), ' Note']
     );
-    addCookBtn.addEventListener('click', () => openCookSheetForNew());
-    quick.appendChild(addCookBtn);
+    addNoteBtn.addEventListener('click', () => openNoteSheetForNew());
+    quick.appendChild(addNoteBtn);
+    if (showCookedBtn) {
+      const addCookBtn = el(
+        'button',
+        {
+          class: 'quick-action quick-action-tertiary',
+          type: 'button',
+          id: 'add-cook-btn',
+          'aria-label': 'Log a cook session',
+        },
+        [el('span', { class: 'quick-icon', 'aria-hidden': 'true' }, ['🍳']), ' Cooked']
+      );
+      addCookBtn.addEventListener('click', () => openCookSheetForNew());
+      quick.appendChild(addCookBtn);
+    }
   }
-  quick.appendChild(addWeightBtn);
-  quick.appendChild(addNoteBtn);
-  quick.appendChild(addBowelBtn);
   app.appendChild(quick);
 
   // Queue banner
@@ -3965,7 +3987,9 @@ function renderNotesSection(): HTMLElement {
 
   if (notes.length === 0) {
     section.appendChild(
-      el('div', { class: 'today-empty' }, ['No notes yet. Tap 📝 Note up top to add one.'])
+      el('div', { class: 'today-empty' }, [
+        'No notes yet. Tap ＋ More → 📝 Note up top to add one.',
+      ])
     );
     return section;
   }

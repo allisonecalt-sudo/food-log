@@ -1389,6 +1389,27 @@ button {
   background: #b08e6a;
 }
 
+/* --- "More" disclosure pill (Note + Cooked live behind it) --------------- *
+ * Deliberately QUIET — no accent fill, no shadow — so it reads as "more
+ * options," not another capture. Keeps the primary trio (Meal/Weight/Bowel)
+ * visually dominant and the top close to her "two sibling pills" calm. */
+.quick-action-more {
+  background: var(--bg-elev-2);
+  color: var(--text-dim);
+  border: 1px solid var(--border-strong);
+  box-shadow: none;
+}
+
+.quick-action-more:hover {
+  background: var(--bg-elev-3);
+  color: var(--text);
+}
+
+.quick-action-more-open {
+  background: var(--bg-elev-3);
+  color: var(--text);
+}
+
 /* --- Bristol type selector (bowel sheet) --------------------------------- */
 .bristol-selector {
   display: flex;
