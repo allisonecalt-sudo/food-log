@@ -463,8 +463,8 @@ test.beforeEach(async ({ page }) => {
 
 test('home screen renders title + add-meal button + empty today', async ({ page }) => {
   await expect(page.locator('h1')).toHaveText('Food Log');
-  // Visible build version in the header (so she can tell a new build loaded).
-  await expect(page.locator('.app-version')).toHaveText(/^v\d+\.\d+$/);
+  // Visible build version + date in the header (so she can tell a new build loaded).
+  await expect(page.locator('.app-version')).toHaveText(/^v\d+\.\d+ · \w+ \d+, \d{4}$/);
   await expect(page.locator('#add-meal-btn')).toBeVisible();
   // v1.6: there are two .today-empty messages on a fresh home (meals + weight).
   // Scope the meal empty-state to the first card so the selector is unambiguous.
@@ -769,7 +769,7 @@ test('service worker file is served at /sw.js and references our shell assets', 
   const res = await page.request.get('/sw.js');
   expect(res.ok()).toBeTruthy();
   const body = await res.text();
-  expect(body).toContain('food-log-v2-4');
+  expect(body).toContain('food-log-v2-5');
   expect(body).toContain('./dist/app.js');
   expect(body).toContain('./manifest.webmanifest');
 });

@@ -51,9 +51,11 @@ const WEIGHT_TABLE = 'weight_log';
 const COOKS_TABLE = 'cook_sessions';
 const NOTES_TABLE = 'notes'; // v1.8 — scratchpad surface, sibling to meals/weight/cooks
 const BOWEL_TABLE = 'bowel_log'; // v1.9 — Bristol Stool Scale log, sibling to weight/notes
-// Visible build version (shown in the header) so she can tell at a glance whether
-// a new build actually loaded. BUMP THIS TOGETHER WITH sw.js VERSION on every deploy.
-const APP_VERSION = 'v2.4';
+// Visible build version + date (shown in the header) so she can tell at a glance
+// whether a new build loaded AND when it last changed. BUMP ALL THREE TOGETHER —
+// APP_VERSION, BUILD_DATE, and the sw.js VERSION — on every single deploy.
+const APP_VERSION = 'v2.5';
+const BUILD_DATE = 'Jun 18, 2026';
 const HISTORY_DAYS = 30;
 const COOK_LOOKBACK_DAYS = 14; // cook sessions older than this are dropped from the runway strip
 const WEIGHT_PREVIEW_COUNT = 5; // last N weights shown collapsed on home
@@ -2521,7 +2523,7 @@ function render(): void {
       new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
     ])
   );
-  headerMeta.appendChild(el('span', { class: 'app-version' }, [APP_VERSION]));
+  headerMeta.appendChild(el('span', { class: 'app-version' }, [`${APP_VERSION} · ${BUILD_DATE}`]));
   header.appendChild(headerMeta);
   app.appendChild(header);
 
