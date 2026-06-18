@@ -67,6 +67,9 @@ https://allisonecalt-sudo.github.io/food-log/
     `ON DELETE CASCADE`
   - `weight_log` (id, measured_at, weight_kg, notes, created_at) — sibling to
     meals, parallel surface
+  - `bowel_log` (id, occurred_at, bristol_type, note, created_at) — v1.9
+    sibling surface. Bristol Stool Scale (1–7) + optional note. Objective
+    gut-health / flare data, correlated against the prior ~48h of meals.
 - Storage bucket: `food-photos` (public, RLS allows anon read + write —
   single-user app pattern).
 - See `setup.sql` for the schema + RLS policies. New tables applied via the

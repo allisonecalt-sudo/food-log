@@ -67,6 +67,12 @@ async function mockSupabase(page: Page): Promise<void> {
     noted_at: string;
     text: string;
   }> = [];
+  const bowelLog: Array<{
+    id: string;
+    occurred_at: string;
+    bristol_type: number;
+    note: string | null;
+  }> = [];
 
   await page.route(/supabase\.co\/rest\/v1\/meals(\?.*)?$/, async (route: Route) => {
     const method = route.request().method();
@@ -338,6 +344,68 @@ async function mockSupabase(page: Page): Promise<void> {
       const id = idMatch?.replace(/^eq\./, '') ?? '';
       const idx = notesRows.findIndex((n) => n.id === id);
       if (idx >= 0) notesRows.splice(idx, 1);
+      await route.fulfill({ status: 204, body: '' });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.route(/supabase\.co\/rest\/v1\/bowel_log(\?.*)?$/, async (route: Route) => {
+    const method = route.request().method();
+    const url = new URL(route.request().url());
+    if (method === 'GET') {
+      const sorted = [...bowelLog].sort(
+        (a, b) => new Date(b.occurred_at).getTime() - new Date(a.occurred_at).getTime()
+      );
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(sorted),
+      });
+      return;
+    }
+    if (method === 'POST') {
+      const body = JSON.parse(route.request().postData() || '{}') as {
+        occurred_at: string;
+        bristol_type: number;
+        note: string | null;
+      };
+      const row = {
+        id: 'mock-bowel-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+        occurred_at: body.occurred_at,
+        bristol_type: body.bristol_type,
+        note: body.note ?? null,
+      };
+      bowelLog.push(row);
+      await route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify([row]),
+      });
+      return;
+    }
+    if (method === 'PATCH') {
+      const idMatch = url.searchParams.get('id');
+      const id = idMatch?.replace(/^eq\./, '') ?? '';
+      const body = JSON.parse(route.request().postData() || '{}') as Partial<{
+        occurred_at: string;
+        bristol_type: number;
+        note: string | null;
+      }>;
+      const target = bowelLog.find((b) => b.id === id);
+      if (target) {
+        if (body.occurred_at !== undefined) target.occurred_at = body.occurred_at;
+        if (body.bristol_type !== undefined) target.bristol_type = body.bristol_type;
+        if (body.note !== undefined) target.note = body.note;
+      }
+      await route.fulfill({ status: 204, body: '' });
+      return;
+    }
+    if (method === 'DELETE') {
+      const idMatch = url.searchParams.get('id');
+      const id = idMatch?.replace(/^eq\./, '') ?? '';
+      const idx = bowelLog.findIndex((b) => b.id === id);
+      if (idx >= 0) bowelLog.splice(idx, 1);
       await route.fulfill({ status: 204, body: '' });
       return;
     }
@@ -699,7 +767,7 @@ test('service worker file is served at /sw.js and references our shell assets', 
   const res = await page.request.get('/sw.js');
   expect(res.ok()).toBeTruthy();
   const body = await res.text();
-  expect(body).toContain('food-log-v2-0');
+  expect(body).toContain('food-log-v2-1');
   expect(body).toContain('./dist/app.js');
   expect(body).toContain('./manifest.webmanifest');
 });
@@ -714,13 +782,15 @@ test('home screen shows the ⚖ Weight + 📝 Note sibling buttons next to ➕ M
   // v1.8: Notes is always-on (sibling to meals/weight). Notes captures
   // app-meta thoughts she was previously misrouting into meals.description.
   await expect(page.locator('#add-note-btn')).toBeVisible();
+  // v1.9: Bowel is always-on too (Bristol Stool Scale, flare data).
+  await expect(page.locator('#add-bowel-btn')).toBeVisible();
   // Cooked button is hidden by default and only appears once she has at least
   // one cook session in history (2026-05-27 audit: avoid surfacing an unused
   // affordance during the data-gathering phase).
   await expect(page.locator('#add-cook-btn')).toHaveCount(0);
-  // Three always-on pills (meal + weight + note); cook is conditional.
+  // Four always-on pills (meal + weight + note + bowel); cook is conditional.
   const siblings = page.locator('.quick-actions .quick-action');
-  await expect(siblings).toHaveCount(3);
+  await expect(siblings).toHaveCount(4);
 });
 
 test('Cooked button appears once a cook session exists', async ({ page }) => {
@@ -739,9 +809,9 @@ test('Cooked button appears once a cook session exists', async ({ page }) => {
   });
   await page.reload();
   await expect(page.locator('#add-cook-btn')).toBeVisible();
-  // 4 pills now: meal + cook + weight + note.
+  // 5 pills now: meal + cook + weight + note + bowel.
   const siblings = page.locator('.quick-actions .quick-action');
-  await expect(siblings).toHaveCount(4);
+  await expect(siblings).toHaveCount(5);
 });
 
 test('Weight button opens the weight sheet with chip row + kg input + notes', async ({ page }) => {
@@ -877,4 +947,97 @@ test('Notes survive a page refresh (Supabase round-trip, not local-only)', async
   const firstRow = page.locator('.notes-section .note-row').first();
   await expect(firstRow).toBeVisible({ timeout: 5000 });
   await expect(firstRow.locator('.note-row-text')).toContainText('persistent thought');
+});
+
+// ─── v1.9 bowel surface (Bristol Stool Scale) ───────────────────────────────
+
+test('Bowel button opens the bowel sheet with chip row + 7 Bristol options + note', async ({
+  page,
+}) => {
+  await page.locator('#add-bowel-btn').click();
+  await expect(page.locator('.sheet-panel')).toBeVisible();
+  // Same fuzzy-time chip row as weight/meals.
+  for (const id of ['now', 'morning', 'midday', 'afternoon', 'evening', 'late', 'custom']) {
+    await expect(page.locator(`#bowel-chip-${id}`)).toBeVisible();
+  }
+  await expect(page.locator('#bowel-chip-now')).toHaveClass(/chip-selected/);
+  // All 7 Bristol type options present.
+  for (let t = 1; t <= 7; t++) {
+    await expect(page.locator(`#bowel-type-${t}`)).toBeVisible();
+  }
+  await expect(page.locator('#sheet-bowel-note')).toBeVisible();
+});
+
+test('Bowel save is disabled until a type is picked, enabled after', async ({ page }) => {
+  await page.locator('#add-bowel-btn').click();
+  const save = page.locator('#sheet-bowel-save');
+  await expect(save).toBeDisabled();
+  await page.locator('#bowel-type-4').click();
+  await expect(page.locator('#bowel-type-4')).toHaveClass(/bristol-selected/);
+  await expect(save).toBeEnabled();
+});
+
+test('saving a bowel entry shows it in the Bowel section with type badge + label', async ({
+  page,
+}) => {
+  await page.locator('#add-bowel-btn').click();
+  await page.locator('#bowel-type-3').click();
+  await page.locator('#sheet-bowel-note').fill('felt normal, no pain');
+  await page.locator('#sheet-bowel-save').click();
+  // Sheet closes, row appears.
+  await expect(page.locator('.sheet-panel')).toHaveCount(0);
+  const firstRow = page.locator('.bowel-list .bowel-row').first();
+  await expect(firstRow).toBeVisible({ timeout: 5000 });
+  await expect(firstRow.locator('.bowel-row-type')).toHaveText('3');
+  await expect(firstRow.locator('.bowel-row-label')).toContainText('Sausage with cracks');
+  await expect(firstRow.locator('.bowel-row-note')).toContainText('felt normal');
+  await expect(page.locator('.toast')).toContainText(/saved/);
+});
+
+test('tapping a bowel row opens a lightbox with the type + label + close', async ({ page }) => {
+  await page.locator('#add-bowel-btn').click();
+  await page.locator('#bowel-type-6').click();
+  await page.locator('#sheet-bowel-save').click();
+  await page.locator('.bowel-list .bowel-row').first().click();
+  await expect(page.locator('.lightbox')).toBeVisible();
+  await expect(page.locator('.lightbox-bowel-type')).toHaveText('Type 6');
+  await expect(page.locator('.lightbox-bowel-label')).toContainText('Mushy, ragged edges');
+  // Type 6 carries the "mild diarrhea" hint.
+  await expect(page.locator('.lightbox-bowel-label')).toContainText('mild diarrhea');
+  await expect(page.locator('.lightbox-close')).toBeVisible();
+  await page.locator('.lightbox-close').click();
+  await expect(page.locator('.lightbox')).toHaveCount(0);
+});
+
+test('editing a bowel entry changes the Bristol type', async ({ page }) => {
+  await page.locator('#add-bowel-btn').click();
+  await page.locator('#bowel-type-4').click();
+  await page.locator('#sheet-bowel-save').click();
+  await page.locator('.bowel-list .bowel-row').first().click();
+  await page.locator('.lightbox-edit').click();
+  // The edit sheet pre-selects the saved type.
+  await expect(page.locator('#bowel-type-4')).toHaveClass(/bristol-selected/);
+  await page.locator('#bowel-type-7').click();
+  await page.locator('#sheet-bowel-save').click();
+  const firstRow = page.locator('.bowel-list .bowel-row').first();
+  await expect(firstRow.locator('.bowel-row-type')).toHaveText('7');
+  await expect(firstRow.locator('.bowel-row-label')).toContainText('Liquid, no solid pieces');
+});
+
+test('Bowel section shows an empty-state hint when no entries exist', async ({ page }) => {
+  await expect(page.locator('.bowel-section .today-empty')).toContainText(/No bowel entries/i);
+});
+
+test('Bowel entries survive a page refresh (Supabase round-trip, not local-only)', async ({
+  page,
+}) => {
+  await page.locator('#add-bowel-btn').click();
+  await page.locator('#bowel-type-2').click();
+  await page.locator('#sheet-bowel-save').click();
+  await expect(page.locator('.bowel-list .bowel-row').first()).toBeVisible({ timeout: 5000 });
+
+  await page.reload();
+  const firstRow = page.locator('.bowel-list .bowel-row').first();
+  await expect(firstRow).toBeVisible({ timeout: 5000 });
+  await expect(firstRow.locator('.bowel-row-type')).toHaveText('2');
 });

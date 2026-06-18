@@ -187,3 +187,38 @@ create policy "anon read"   on public.notes for select using (true);
 create policy "anon insert" on public.notes for insert with check (true);
 create policy "anon update" on public.notes for update using (true) with check (true);
 create policy "anon delete" on public.notes for delete using (true);
+
+-- 8) v1.9 bowel_log — Bristol Stool Scale log, sibling to weight/notes
+--    (timestamp + value + optional note). Purpose: objective flare data
+--    correlated against the prior ~48h of meals. bristol_type is a 1–7 int
+--    (DB CHECK-constrained); the human label lives in the app (BRISTOL_DEFS) so
+--    wording can change with no migration. Applied via the Management API
+--    on 2026-06-18.
+
+create table if not exists public.bowel_log (
+  id uuid primary key default gen_random_uuid(),
+  occurred_at timestamptz not null default now(),
+  bristol_type int not null check (bristol_type between 1 and 7),
+  note text,                           -- nullable; voice-to-text friendly
+  created_at timestamptz not null default now()
+);
+
+create index if not exists bowel_log_occurred_at_idx
+  on public.bowel_log (occurred_at desc);
+
+alter table public.bowel_log enable row level security;
+
+drop policy if exists "anon read"   on public.bowel_log;
+drop policy if exists "anon insert" on public.bowel_log;
+drop policy if exists "anon update" on public.bowel_log;
+drop policy if exists "anon delete" on public.bowel_log;
+
+create policy "anon read"   on public.bowel_log for select using (true);
+create policy "anon insert" on public.bowel_log for insert with check (true);
+create policy "anon update" on public.bowel_log for update using (true) with check (true);
+create policy "anon delete" on public.bowel_log for delete using (true);
+
+-- Data API GRANT — REQUIRED for new tables (Supabase Data API flip, Oct 30 2026).
+-- Without it PostgREST returns 401 even with RLS open. Same anon-CRUD grant the
+-- other single-user tables use.
+grant select, insert, update, delete on public.bowel_log to anon, authenticated, service_role;

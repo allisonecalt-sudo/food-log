@@ -50,16 +50,19 @@ const PHOTOS_TABLE = 'meal_photos';
 const WEIGHT_TABLE = 'weight_log';
 const COOKS_TABLE = 'cook_sessions';
 const NOTES_TABLE = 'notes'; // v1.8 — scratchpad surface, sibling to meals/weight/cooks
+const BOWEL_TABLE = 'bowel_log'; // v1.9 — Bristol Stool Scale log, sibling to weight/notes
 const HISTORY_DAYS = 30;
 const COOK_LOOKBACK_DAYS = 14; // cook sessions older than this are dropped from the runway strip
 const WEIGHT_PREVIEW_COUNT = 5; // last N weights shown collapsed on home
 const NOTES_PREVIEW_COUNT = 5; // last N notes shown collapsed on home
+const BOWEL_PREVIEW_COUNT = 5; // last N bowel entries shown collapsed on home
 const LB_PER_KG = 2.20462;
 const IDB_NAME = 'food-log-queue';
 const IDB_STORE_MEALS = 'pending-meals';
 const IDB_STORE_WEIGHTS = 'pending-weights'; // v1.6 add
 const IDB_STORE_COOKS = 'pending-cooks'; // v1.7 add
 const IDB_STORE_NOTES = 'pending-notes'; // v1.8 add
+const IDB_STORE_BOWELS = 'pending-bowels'; // v1.9 add
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -151,6 +154,27 @@ interface PendingNote {
   localId: string;
   noted_at: string;
   text: string;
+}
+
+// v1.9 — bowel entry = one bowel movement scored on the Bristol Stool Scale
+// (type 1–7) + an optional note. Sibling to weight/notes (timestamp + value +
+// note), NOT nested under meals. Purpose: objective flare data to correlate
+// against the prior ~48h of meals. bristol_type is the DB int (1–7); the human
+// label lives in BRISTOL_DEFS, not the row, so labels can evolve without a
+// migration.
+interface BowelEntry {
+  id: string;
+  occurred_at: string;
+  bristol_type: number; // 1–7, DB CHECK-constrained
+  note: string | null;
+  pending: boolean;
+}
+
+interface PendingBowel {
+  localId: string;
+  occurred_at: string;
+  bristol_type: number;
+  note: string | null;
 }
 
 // State the meal-entry sheet manages while it's open.
@@ -254,6 +278,36 @@ function chipLabel(c: ChipId): string {
   return CHIP_DEFS.find((d) => d.id === c)?.label ?? 'Now';
 }
 
+// ─── Bristol Stool Scale (v1.9) ─────────────────────────────────────────────
+
+// The 7 Bristol types, each with a short plain-language label + an optional
+// clinical hint so nothing needs memorizing at log-time. The DB stores only the
+// int (bristol_type); these labels are display-side so wording can change with
+// no migration. Source: build spec 2026-06-18 (her words for each type).
+interface BristolDef {
+  type: number; // 1–7
+  label: string;
+  hint: string; // '' when the type is just "normal range" with no flag
+}
+
+const BRISTOL_DEFS: readonly BristolDef[] = [
+  { type: 1, label: 'Separate hard lumps', hint: 'constipated' },
+  { type: 2, label: 'Lumpy, sausage-shaped', hint: '' },
+  { type: 3, label: 'Sausage with cracks', hint: 'normal' },
+  { type: 4, label: 'Smooth soft sausage', hint: 'normal' },
+  { type: 5, label: 'Soft blobs, clear edges', hint: '' },
+  { type: 6, label: 'Mushy, ragged edges', hint: 'mild diarrhea' },
+  { type: 7, label: 'Liquid, no solid pieces', hint: 'diarrhea' },
+];
+
+function bristolDef(type: number): BristolDef | undefined {
+  return BRISTOL_DEFS.find((b) => b.type === type);
+}
+
+function bristolLabel(type: number): string {
+  return bristolDef(type)?.label ?? `Type ${type}`;
+}
+
 // ─── Sheet states ───────────────────────────────────────────────────────────
 
 interface SheetState {
@@ -302,6 +356,17 @@ interface NoteSheetState {
   text: string;
 }
 
+// v1.9 — bowel sheet. Fuzzy-time chip row (like weight) + a required Bristol
+// type 1–7 selector + an optional note. bristolType is null until she picks one;
+// Save stays disabled until then (the type is the whole point of the entry).
+interface BowelSheetState {
+  bowelId: string | null; // null = new entry; otherwise editing
+  chip: ChipId;
+  occurredAtLocal: string;
+  bristolType: number | null;
+  note: string;
+}
+
 // ─── DOM helpers ────────────────────────────────────────────────────────────
 
 function $(sel: string, root: ParentNode = document): HTMLElement | null {
@@ -348,16 +413,20 @@ let meals: Meal[] = [];
 let weights: WeightEntry[] = [];
 let cooks: CookSession[] = [];
 let notes: Note[] = [];
+let bowels: BowelEntry[] = [];
 let lightboxMeal: Meal | null = null;
 let weightLightbox: WeightEntry | null = null;
 let cookLightbox: CookSession | null = null;
 let noteLightbox: Note | null = null;
+let bowelLightbox: BowelEntry | null = null;
 let sheet: SheetState | null = null;
 let weightSheet: WeightSheetState | null = null;
 let cookSheet: CookSheetState | null = null;
 let noteSheet: NoteSheetState | null = null;
+let bowelSheet: BowelSheetState | null = null;
 let weightHistoryOpen = false;
 let notesHistoryOpen = false;
+let bowelHistoryOpen = false;
 // Last-used display unit for weight. New entries default to this. Initialized
 // to whatever the most-recent row used; falls back to 'lb' on empty history
 // (Allison weighs in lb — May 31 2026). weight_kg stays canonical kg; unit
@@ -455,8 +524,8 @@ function formatWeight(kg: number, unit: WeightUnit): string {
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    // v5: adds pending-notes store.
-    const req = indexedDB.open(IDB_NAME, 5);
+    // v6: adds pending-bowels store.
+    const req = indexedDB.open(IDB_NAME, 6);
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(IDB_STORE_MEALS)) {
@@ -470,6 +539,9 @@ function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(IDB_STORE_NOTES)) {
         db.createObjectStore(IDB_STORE_NOTES, { keyPath: 'localId' });
+      }
+      if (!db.objectStoreNames.contains(IDB_STORE_BOWELS)) {
+        db.createObjectStore(IDB_STORE_BOWELS, { keyPath: 'localId' });
       }
       // Best-effort: nuke v1 store so its photo-only entries don't linger.
       if (db.objectStoreNames.contains('pending')) {
@@ -617,6 +689,40 @@ async function removePendingNote(localId: string): Promise<void> {
   db.close();
 }
 
+async function queuePendingBowel(item: PendingBowel): Promise<void> {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE_BOWELS, 'readwrite');
+    tx.objectStore(IDB_STORE_BOWELS).put(item);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+
+async function readPendingBowels(): Promise<PendingBowel[]> {
+  const db = await openDb();
+  const result = await new Promise<PendingBowel[]>((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE_BOWELS, 'readonly');
+    const req = tx.objectStore(IDB_STORE_BOWELS).getAll();
+    req.onsuccess = () => resolve(req.result as PendingBowel[]);
+    req.onerror = () => reject(req.error);
+  });
+  db.close();
+  return result;
+}
+
+async function removePendingBowel(localId: string): Promise<void> {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE_BOWELS, 'readwrite');
+    tx.objectStore(IDB_STORE_BOWELS).delete(localId);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+
 // ─── Supabase API ───────────────────────────────────────────────────────────
 
 async function uploadPhoto(blob: Blob, path: string): Promise<void> {
@@ -683,6 +789,13 @@ interface NoteRow {
   id: string;
   noted_at: string;
   text: string;
+}
+
+interface BowelRow {
+  id: string;
+  occurred_at: string;
+  bristol_type: number;
+  note: string | null;
 }
 
 function rowNumOrNull(v: number | string | null | undefined): number | null {
@@ -981,6 +1094,87 @@ async function fetchNotes(): Promise<Note[]> {
     id: r.id,
     noted_at: r.noted_at,
     text: r.text,
+    pending: false,
+  }));
+}
+
+// ─── Bowel API (v1.9) ───────────────────────────────────────────────────────
+
+async function insertBowelRow(
+  occurredAt: string,
+  bristolType: number,
+  note: string | null
+): Promise<BowelRow> {
+  const res = await fetch(`${SB_URL}/rest/v1/${BOWEL_TABLE}`, {
+    method: 'POST',
+    headers: {
+      apikey: SB_KEY,
+      Authorization: `Bearer ${SB_KEY}`,
+      'Content-Type': 'application/json',
+      Prefer: 'return=representation',
+    },
+    body: JSON.stringify({ occurred_at: occurredAt, bristol_type: bristolType, note }),
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`bowel insert failed (${res.status}): ${t}`);
+  }
+  const rows = (await res.json()) as BowelRow[];
+  return rows[0];
+}
+
+async function patchBowelRow(
+  bowelId: string,
+  occurredAt: string,
+  bristolType: number,
+  note: string | null
+): Promise<void> {
+  const res = await fetch(`${SB_URL}/rest/v1/${BOWEL_TABLE}?id=eq.${encodeURIComponent(bowelId)}`, {
+    method: 'PATCH',
+    headers: {
+      apikey: SB_KEY,
+      Authorization: `Bearer ${SB_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ occurred_at: occurredAt, bristol_type: bristolType, note }),
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`bowel patch failed (${res.status}): ${t}`);
+  }
+}
+
+async function deleteBowelRow(bowelId: string): Promise<void> {
+  const res = await fetch(`${SB_URL}/rest/v1/${BOWEL_TABLE}?id=eq.${encodeURIComponent(bowelId)}`, {
+    method: 'DELETE',
+    headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` },
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`bowel delete failed (${res.status}): ${t}`);
+  }
+}
+
+async function fetchBowels(): Promise<BowelEntry[]> {
+  // Pull more than the preview count so the expanded history view is populated too.
+  const url =
+    `${SB_URL}/rest/v1/${BOWEL_TABLE}` +
+    `?select=id,occurred_at,bristol_type,note` +
+    `&order=occurred_at.desc&limit=200`;
+  const res = await fetch(url, {
+    headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` },
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`bowels fetch failed (${res.status}): ${t}`);
+  }
+  const rows = (await res.json()) as BowelRow[];
+  return rows.map((r) => ({
+    id: r.id,
+    occurred_at: r.occurred_at,
+    bristol_type:
+      typeof r.bristol_type === 'string' ? parseInt(r.bristol_type, 10) : r.bristol_type,
+    note: r.note,
     pending: false,
   }));
 }
@@ -1314,6 +1508,27 @@ async function drainQueue(): Promise<void> {
       }
     }
     sortNotes();
+
+    // Then bowels.
+    const pendingBowels = await readPendingBowels();
+    for (const item of pendingBowels) {
+      try {
+        const row = await insertBowelRow(item.occurred_at, item.bristol_type, item.note);
+        await removePendingBowel(item.localId);
+        bowels = bowels.filter((b) => b.id !== item.localId);
+        bowels.unshift({
+          id: row.id,
+          occurred_at: row.occurred_at,
+          bristol_type: row.bristol_type,
+          note: row.note,
+          pending: false,
+        });
+      } catch (err) {
+        console.warn('[food-log] bowel queue drain failed (will retry):', err);
+        break;
+      }
+    }
+    sortBowels();
     render();
   } finally {
     draining = false;
@@ -1328,13 +1543,15 @@ async function updateQueueBanner(): Promise<void> {
   const weightCount = (await readPendingWeights().catch(() => [])).length;
   const cookCount = (await readPendingCooks().catch(() => [])).length;
   const noteCount = (await readPendingNotes().catch(() => [])).length;
-  const total = mealCount + weightCount + cookCount + noteCount;
+  const bowelCount = (await readPendingBowels().catch(() => [])).length;
+  const total = mealCount + weightCount + cookCount + noteCount + bowelCount;
   if (total > 0) {
     const parts: string[] = [];
     if (mealCount > 0) parts.push(`${mealCount} meal${mealCount === 1 ? '' : 's'}`);
     if (weightCount > 0) parts.push(`${weightCount} weight${weightCount === 1 ? '' : 's'}`);
     if (cookCount > 0) parts.push(`${cookCount} cook${cookCount === 1 ? '' : 's'}`);
     if (noteCount > 0) parts.push(`${noteCount} note${noteCount === 1 ? '' : 's'}`);
+    if (bowelCount > 0) parts.push(`${bowelCount} bowel${bowelCount === 1 ? '' : 's'}`);
     banner.textContent = `${parts.join(' + ')} queued — will upload when online`;
     banner.classList.add('visible');
   } else {
@@ -1876,6 +2093,124 @@ async function commitNoteSheet(): Promise<void> {
   }
 }
 
+// ─── Bowel sheet (v1.9) ─────────────────────────────────────────────────────
+
+function openBowelSheetForNew(): void {
+  bowelSheet = {
+    bowelId: null,
+    chip: 'now',
+    occurredAtLocal: isoToDatetimeLocal(new Date().toISOString()),
+    bristolType: null,
+    note: '',
+  };
+  render();
+}
+
+function openBowelSheetForEdit(b: BowelEntry): void {
+  bowelSheet = {
+    bowelId: b.id,
+    chip: chipForIso(b.occurred_at),
+    occurredAtLocal: isoToDatetimeLocal(b.occurred_at),
+    bristolType: b.bristol_type,
+    note: b.note ?? '',
+  };
+  bowelLightbox = null;
+  render();
+}
+
+function closeBowelSheet(force = false): void {
+  if (!bowelSheet) return;
+  const s = bowelSheet;
+  // Confirm only if she's entered something meaningful (a type pick or a note).
+  const hasContent = s.bristolType !== null || s.note.trim().length > 0;
+  if (!force && hasContent) {
+    if (!window.confirm('Discard this entry?')) return;
+  }
+  bowelSheet = null;
+  render();
+}
+
+function bowelSheetIsSaveable(s: BowelSheetState): boolean {
+  return s.bristolType !== null;
+}
+
+function resolveOccurredAt(s: BowelSheetState): string {
+  if (s.chip === 'custom') return datetimeLocalToIso(s.occurredAtLocal);
+  return isoForChip(s.chip);
+}
+
+async function commitBowelSheet(): Promise<void> {
+  if (!bowelSheet) return;
+  if (!bowelSheetIsSaveable(bowelSheet)) {
+    toast('pick a type first');
+    return;
+  }
+  const s = bowelSheet;
+  const occurredAt = resolveOccurredAt(s);
+  const bristolType = s.bristolType;
+  if (bristolType === null) return;
+  const note = s.note.trim() === '' ? null : s.note.trim();
+
+  if (s.bowelId === null) {
+    const localId = uuid();
+    const optimistic: BowelEntry = {
+      id: localId,
+      occurred_at: occurredAt,
+      bristol_type: bristolType,
+      note,
+      pending: true,
+    };
+    bowels.unshift(optimistic);
+    sortBowels();
+    bowelSheet = null;
+    render();
+    toast('saving…');
+    try {
+      const row = await insertBowelRow(occurredAt, bristolType, note);
+      bowels = bowels.filter((b) => b.id !== localId);
+      bowels.unshift({
+        id: row.id,
+        occurred_at: row.occurred_at,
+        bristol_type: row.bristol_type,
+        note: row.note,
+        pending: false,
+      });
+      sortBowels();
+      render();
+      toast('saved ✓');
+    } catch (err) {
+      console.warn('[food-log] bowel save failed, queueing:', err);
+      await queuePendingBowel({
+        localId,
+        occurred_at: occurredAt,
+        bristol_type: bristolType,
+        note,
+      });
+      toast('saved offline — will upload later', 2500);
+    } finally {
+      updateQueueBanner();
+    }
+  } else {
+    // EDIT.
+    const id = s.bowelId;
+    bowelSheet = null;
+    render();
+    toast('saving…');
+    try {
+      await patchBowelRow(id, occurredAt, bristolType, note);
+      bowels = bowels.map((b) =>
+        b.id === id ? { ...b, occurred_at: occurredAt, bristol_type: bristolType, note } : b
+      );
+      sortBowels();
+      render();
+      toast('updated ✓');
+    } catch (err) {
+      console.error('[food-log] bowel edit failed:', err);
+      toast('update failed — try again');
+    }
+  }
+}
+
 // ─── Runway analysis (v1.7) ────────────────────────────────────────────────
 
 interface CookRunway {
@@ -1991,6 +2326,10 @@ function sortCooks(): void {
 
 function sortNotes(): void {
   notes.sort((a, b) => new Date(b.noted_at).getTime() - new Date(a.noted_at).getTime());
+}
+
+function sortBowels(): void {
+  bowels.sort((a, b) => new Date(b.occurred_at).getTime() - new Date(a.occurred_at).getTime());
 }
 
 // ─── Render ─────────────────────────────────────────────────────────────────
@@ -2173,15 +2512,11 @@ function render(): void {
   // Notes (v1.8) ships always-on because the need pre-dates the data: she was
   // ALREADY misusing meal.description to hold app-meta thoughts.
   const showCookedBtn = cooks.length > 0;
-  const pillCount = 3 + (showCookedBtn ? 1 : 0);
-  // Use existing 3-pill wrap class for 3, add new 4-pill class for 4 so the
-  // grid stays calm at 412px mobile (two rows of two on narrow viewports).
+  // Always-on pills: Meal, Weight, Note, Bowel (4). Cooked is conditional → up
+  // to 5. 4 → calm 2×2 grid; 5 → 3-then-2 wrap. Both stay legible at 412px.
+  const pillCount = 4 + (showCookedBtn ? 1 : 0);
   const pillClass =
-    pillCount === 4
-      ? 'quick-actions quick-actions-four'
-      : pillCount === 3
-        ? 'quick-actions quick-actions-three'
-        : 'quick-actions';
+    pillCount === 5 ? 'quick-actions quick-actions-five' : 'quick-actions quick-actions-four';
   const quick = el('div', { class: pillClass });
   const addMealBtn = el(
     'button',
@@ -2216,6 +2551,17 @@ function render(): void {
     [el('span', { class: 'quick-icon', 'aria-hidden': 'true' }, ['📝']), ' Note']
   );
   addNoteBtn.addEventListener('click', () => openNoteSheetForNew());
+  const addBowelBtn = el(
+    'button',
+    {
+      class: 'quick-action quick-action-quinary',
+      type: 'button',
+      id: 'add-bowel-btn',
+      'aria-label': 'Log a bowel movement',
+    },
+    [el('span', { class: 'quick-icon', 'aria-hidden': 'true' }, ['🚽']), ' Bowel']
+  );
+  addBowelBtn.addEventListener('click', () => openBowelSheetForNew());
   quick.appendChild(addMealBtn);
   if (showCookedBtn) {
     const addCookBtn = el(
@@ -2233,6 +2579,7 @@ function render(): void {
   }
   quick.appendChild(addWeightBtn);
   quick.appendChild(addNoteBtn);
+  quick.appendChild(addBowelBtn);
   app.appendChild(quick);
 
   // Queue banner
@@ -2312,7 +2659,12 @@ function render(): void {
     app.appendChild(el('div', { class: 'history-empty' }, ['No earlier days yet — keep going.']));
   }
 
-  // Weight section (below meals).
+  // Bowel section (directly below meals/history). Placed here on purpose: the
+  // whole point is correlating bowel type against the prior ~48h of food, so the
+  // two surfaces sit adjacent (v1.9, flare watch).
+  app.appendChild(renderBowelSection());
+
+  // Weight section (below bowel).
   app.appendChild(renderWeightSection());
 
   // Notes section (below weight).
@@ -2332,6 +2684,9 @@ function render(): void {
   if (noteLightbox) {
     root.appendChild(buildNoteLightbox(noteLightbox));
   }
+  if (bowelLightbox) {
+    root.appendChild(buildBowelLightbox(bowelLightbox));
+  }
 
   if (sheet) {
     root.appendChild(buildSheet(sheet));
@@ -2344,6 +2699,9 @@ function render(): void {
   }
   if (noteSheet) {
     root.appendChild(buildNoteSheet(noteSheet));
+  }
+  if (bowelSheet) {
+    root.appendChild(buildBowelSheet(bowelSheet));
   }
 
   void updateQueueBanner();
@@ -3770,25 +4128,388 @@ function buildNoteLightbox(n: Note): HTMLElement {
   return root;
 }
 
+// ─── Bowel UI (v1.9) ────────────────────────────────────────────────────────
+
+function openBowelLightbox(b: BowelEntry): void {
+  bowelLightbox = b;
+  render();
+}
+
+function closeBowelLightbox(): void {
+  bowelLightbox = null;
+  render();
+}
+
+function renderBowelRow(b: BowelEntry): HTMLElement {
+  const def = bristolDef(b.bristol_type);
+  const row = el('button', {
+    class: 'bowel-row',
+    type: 'button',
+    'data-bowel-id': b.id,
+    'aria-label': `Bristol type ${b.bristol_type}, ${bristolLabel(b.bristol_type)}, on ${shortDate(
+      b.occurred_at
+    )}`,
+  });
+  row.appendChild(
+    el('span', { class: 'bowel-row-type', 'aria-hidden': 'true' }, [`${b.bristol_type}`])
+  );
+  row.appendChild(el('span', { class: 'bowel-row-label' }, [bristolLabel(b.bristol_type)]));
+  const meta = el('span', { class: 'bowel-row-meta' });
+  meta.appendChild(
+    document.createTextNode(`${dayLabel(b.occurred_at)} · ${formatTime(b.occurred_at)}`)
+  );
+  if (def && def.hint) {
+    meta.appendChild(el('span', { class: 'bowel-row-hint' }, [def.hint]));
+  }
+  if (b.pending) {
+    meta.appendChild(el('span', { class: 'bowel-row-pending' }, ['queued']));
+  }
+  row.appendChild(meta);
+  if (b.note && b.note.trim() !== '') {
+    row.appendChild(el('span', { class: 'bowel-row-note' }, [previewDescription(b.note)]));
+  }
+  row.addEventListener('click', () => openBowelLightbox(b));
+  return row;
+}
+
+function renderBowelSection(): HTMLElement {
+  const section = el('section', { class: 'card bowel-section' });
+  const header = el('div', { class: 'card-header' });
+  header.appendChild(el('h2', { class: 'card-title' }, ['Bowel']));
+  if (bowels.length > 0) {
+    header.appendChild(
+      el('span', { class: 'card-meta' }, [
+        `${bowels.length} ${bowels.length === 1 ? 'entry' : 'entries'}`,
+      ])
+    );
+  }
+  section.appendChild(header);
+
+  if (bowels.length === 0) {
+    section.appendChild(
+      el('div', { class: 'today-empty' }, ['No bowel entries yet. Tap 🚽 Bowel up top to log one.'])
+    );
+    return section;
+  }
+
+  const visible = bowelHistoryOpen ? bowels : bowels.slice(0, BOWEL_PREVIEW_COUNT);
+  const list = el('div', { class: 'bowel-list' });
+  for (const b of visible) list.appendChild(renderBowelRow(b));
+  section.appendChild(list);
+
+  if (bowels.length > BOWEL_PREVIEW_COUNT) {
+    const toggle = el('button', { class: 'weight-toggle', type: 'button' }, [
+      bowelHistoryOpen ? 'Show recent' : `Show all ${bowels.length}`,
+    ]);
+    toggle.addEventListener('click', () => {
+      bowelHistoryOpen = !bowelHistoryOpen;
+      render();
+    });
+    section.appendChild(toggle);
+  }
+
+  return section;
+}
+
+function buildBowelLightbox(b: BowelEntry): HTMLElement {
+  const def = bristolDef(b.bristol_type);
+  const root = el('div', {
+    class: 'lightbox bowel-lightbox',
+    role: 'dialog',
+    'aria-modal': 'true',
+  });
+  const inner = el('div', { class: 'lightbox-inner' });
+
+  inner.appendChild(el('div', { class: 'lightbox-bowel-type' }, [`Type ${b.bristol_type}`]));
+  inner.appendChild(
+    el('div', { class: 'lightbox-bowel-label' }, [
+      def && def.hint
+        ? `${bristolLabel(b.bristol_type)} (${def.hint})`
+        : bristolLabel(b.bristol_type),
+    ])
+  );
+  inner.appendChild(
+    el('div', { class: 'lightbox-time' }, [
+      `${dayLabel(b.occurred_at)} · ${formatTime(b.occurred_at)}`,
+    ])
+  );
+  if (b.note && b.note.trim() !== '') {
+    inner.appendChild(el('div', { class: 'lightbox-desc' }, [b.note]));
+  }
+
+  const actions = el('div', { class: 'lightbox-actions' });
+  const closeBtn = el('button', { class: 'lightbox-close', type: 'button' }, ['Close']);
+  closeBtn.addEventListener('click', closeBowelLightbox);
+  actions.appendChild(closeBtn);
+
+  if (!b.pending) {
+    const editBtn = el(
+      'button',
+      { class: 'lightbox-edit', type: 'button', 'aria-label': 'Edit entry' },
+      ['Edit']
+    );
+    editBtn.addEventListener('click', () => openBowelSheetForEdit(b));
+    actions.appendChild(editBtn);
+
+    const delBtn = el('button', {
+      class: 'lightbox-delete',
+      type: 'button',
+      'aria-label': 'Hold to delete entry',
+    });
+    delBtn.appendChild(el('span', { class: 'hold-fill' }));
+    delBtn.appendChild(el('span', { class: 'lightbox-delete-label' }, ['Hold to delete']));
+    let holdTimer: ReturnType<typeof setTimeout> | null = null;
+    const startHold = (): void => {
+      delBtn.classList.add('holding');
+      holdTimer = setTimeout(() => {
+        void (async () => {
+          try {
+            await deleteBowelRow(b.id);
+            bowels = bowels.filter((x) => x.id !== b.id);
+            closeBowelLightbox();
+            toast('deleted');
+          } catch (err) {
+            console.error('[food-log] bowel delete failed:', err);
+            toast('delete failed');
+            delBtn.classList.remove('holding');
+          }
+        })();
+      }, 700);
+    };
+    const cancelHold = (): void => {
+      delBtn.classList.remove('holding');
+      if (holdTimer) {
+        clearTimeout(holdTimer);
+        holdTimer = null;
+      }
+    };
+    delBtn.addEventListener('pointerdown', startHold);
+    delBtn.addEventListener('pointerup', cancelHold);
+    delBtn.addEventListener('pointerleave', cancelHold);
+    delBtn.addEventListener('pointercancel', cancelHold);
+    actions.appendChild(delBtn);
+  }
+
+  inner.appendChild(actions);
+  root.appendChild(inner);
+
+  root.addEventListener('click', (ev) => {
+    if (ev.target === root) closeBowelLightbox();
+  });
+
+  return root;
+}
+
+function buildBowelSheet(s: BowelSheetState): HTMLElement {
+  const overlay = el('div', {
+    class: 'sheet-overlay bowel-sheet-overlay',
+    role: 'dialog',
+    'aria-modal': 'true',
+  });
+  const panel = el('div', { class: 'sheet-panel' });
+
+  const topBar = el('div', { class: 'sheet-topbar' });
+  topBar.appendChild(
+    el('h2', { class: 'sheet-title' }, [s.bowelId === null ? 'Log bowel' : 'Edit bowel'])
+  );
+  const closeBtn = el(
+    'button',
+    { class: 'sheet-close', type: 'button', id: 'bowel-sheet-close', 'aria-label': 'Close' },
+    ['✕']
+  );
+  closeBtn.addEventListener('click', () => closeBowelSheet());
+  topBar.appendChild(closeBtn);
+  panel.appendChild(topBar);
+
+  const body = el('div', { class: 'sheet-body' });
+
+  // Fuzzy time field — same chip row as weight/meals.
+  const timeWrap = el('div', { class: 'sheet-field' });
+  const timeLabelRow = el('div', { class: 'sheet-label-row' });
+  timeLabelRow.appendChild(el('span', { class: 'sheet-label' }, ['When']));
+  const chipDisplay = el('span', { class: 'sheet-chip-display', id: 'bowel-chip-display' }, [
+    chipLabel(s.chip),
+  ]);
+  timeLabelRow.appendChild(chipDisplay);
+  timeWrap.appendChild(timeLabelRow);
+
+  const customWrap = el('div', { class: 'sheet-custom-row', id: 'bowel-custom-row' });
+  const [datePart, timePart] = (
+    s.occurredAtLocal || isoToDatetimeLocal(new Date().toISOString())
+  ).split('T');
+  const dateInput = el('input', {
+    type: 'date',
+    class: 'sheet-date',
+    id: 'bowel-sheet-date',
+    value: datePart,
+    'aria-label': 'Date',
+  }) as HTMLInputElement;
+  const timeInput = el('input', {
+    type: 'time',
+    class: 'sheet-time',
+    id: 'bowel-sheet-time',
+    value: timePart,
+    'aria-label': 'Time',
+  }) as HTMLInputElement;
+  const recombine = (): void => {
+    if (bowelSheet && dateInput.value && timeInput.value) {
+      bowelSheet.occurredAtLocal = `${dateInput.value}T${timeInput.value}`;
+    }
+  };
+  dateInput.addEventListener('input', recombine);
+  timeInput.addEventListener('input', recombine);
+  customWrap.appendChild(dateInput);
+  customWrap.appendChild(timeInput);
+
+  function reflectCustomVisibility(c: ChipId): void {
+    if (c === 'custom') {
+      customWrap.classList.add('visible');
+    } else {
+      customWrap.classList.remove('visible');
+    }
+  }
+
+  const chipApi = buildChipRow(
+    s.chip,
+    (c) => {
+      if (bowelSheet) bowelSheet.chip = c;
+      chipDisplay.textContent = chipLabel(c);
+      reflectCustomVisibility(c);
+    },
+    'bowel'
+  );
+  timeWrap.appendChild(chipApi.node);
+  timeWrap.appendChild(customWrap);
+  reflectCustomVisibility(s.chip);
+  body.appendChild(timeWrap);
+
+  // Bristol type selector — required. Vertical list of all 7 so nothing needs
+  // memorizing; each shows the number + plain label + the clinical hint.
+  const typeWrap = el('div', { class: 'sheet-field' });
+  typeWrap.appendChild(el('span', { class: 'sheet-label' }, ['Type (Bristol scale)']));
+  const selector = el('div', {
+    class: 'bristol-selector',
+    role: 'radiogroup',
+    'aria-label': 'Bristol stool type',
+  });
+  const optButtons = new Map<number, HTMLButtonElement>();
+  function refreshSelector(): void {
+    for (const [t, btn] of optButtons) {
+      const sel = bowelSheet?.bristolType === t;
+      btn.classList.toggle('bristol-selected', sel);
+      btn.setAttribute('aria-checked', sel ? 'true' : 'false');
+    }
+  }
+  for (const def of BRISTOL_DEFS) {
+    const btn = el('button', {
+      type: 'button',
+      class: 'bristol-option',
+      id: `bowel-type-${def.type}`,
+      'data-type': `${def.type}`,
+      role: 'radio',
+      'aria-checked': s.bristolType === def.type ? 'true' : 'false',
+      'aria-label': `Type ${def.type}: ${def.label}${def.hint ? ` (${def.hint})` : ''}`,
+    }) as HTMLButtonElement;
+    btn.appendChild(el('span', { class: 'bristol-num', 'aria-hidden': 'true' }, [`${def.type}`]));
+    const text = el('span', { class: 'bristol-text' });
+    text.appendChild(el('span', { class: 'bristol-label' }, [def.label]));
+    if (def.hint) text.appendChild(el('span', { class: 'bristol-hint' }, [def.hint]));
+    btn.appendChild(text);
+    btn.addEventListener('click', () => {
+      if (bowelSheet) bowelSheet.bristolType = def.type;
+      refreshSelector();
+      updateSaveButton();
+    });
+    optButtons.set(def.type, btn);
+    selector.appendChild(btn);
+  }
+  refreshSelector();
+  typeWrap.appendChild(selector);
+  body.appendChild(typeWrap);
+
+  // Optional note.
+  const noteWrap = el('label', { class: 'sheet-field' });
+  noteWrap.appendChild(el('span', { class: 'sheet-label' }, ['Note (optional)']));
+  const note = el('textarea', {
+    class: 'sheet-desc',
+    id: 'sheet-bowel-note',
+    rows: '2',
+    placeholder: 'Anything to note (pain, blood, urgency, food suspect…)',
+  }) as HTMLTextAreaElement;
+  note.value = s.note;
+  const autoGrow = (): void => {
+    note.style.height = 'auto';
+    note.style.height = note.scrollHeight + 'px';
+  };
+  note.addEventListener('input', () => {
+    if (bowelSheet) bowelSheet.note = note.value;
+    autoGrow();
+  });
+  noteWrap.appendChild(note);
+  body.appendChild(noteWrap);
+  setTimeout(autoGrow, 0);
+
+  panel.appendChild(body);
+
+  const footer = el('div', { class: 'sheet-footer' });
+  const cancelBtn = el('button', { type: 'button', class: 'sheet-cancel' }, ['Cancel']);
+  cancelBtn.addEventListener('click', () => closeBowelSheet());
+  footer.appendChild(cancelBtn);
+
+  const saveAttrs: Record<string, string> = {
+    type: 'button',
+    class: 'sheet-save',
+    id: 'sheet-bowel-save',
+  };
+  if (!bowelSheetIsSaveable(s)) saveAttrs.disabled = 'true';
+  const saveBtn = el('button', saveAttrs, ['Save']);
+  saveBtn.addEventListener('click', () => {
+    void commitBowelSheet();
+  });
+  footer.appendChild(saveBtn);
+  panel.appendChild(footer);
+
+  function updateSaveButton(): void {
+    if (!bowelSheet) return;
+    if (bowelSheetIsSaveable(bowelSheet)) {
+      saveBtn.removeAttribute('disabled');
+    } else {
+      saveBtn.setAttribute('disabled', 'true');
+    }
+  }
+
+  overlay.addEventListener('click', (ev) => {
+    if (ev.target === overlay) closeBowelSheet();
+  });
+
+  void chipApi.setChip;
+
+  overlay.appendChild(panel);
+  return overlay;
+}
+
 // ─── Boot ──────────────────────────────────────────────────────────────────
 
 async function boot(): Promise<void> {
   render(); // initial paint: empty state + quick-action buttons
   try {
-    const [m, w, c, n] = await Promise.all([
+    const [m, w, c, n, bw] = await Promise.all([
       fetchMeals(),
       fetchWeights(),
       fetchCooks(),
       fetchNotes(),
+      fetchBowels(),
     ]);
     meals = m;
     weights = w;
     cooks = c;
     notes = n;
+    bowels = bw;
     sortMeals();
     sortWeights();
     sortCooks();
     sortNotes();
+    sortBowels();
     // Seed display unit from most recent weight if any.
     if (weights.length > 0) weightDisplayUnit = weights[0].unit;
     render();
