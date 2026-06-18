@@ -51,6 +51,9 @@ const WEIGHT_TABLE = 'weight_log';
 const COOKS_TABLE = 'cook_sessions';
 const NOTES_TABLE = 'notes'; // v1.8 — scratchpad surface, sibling to meals/weight/cooks
 const BOWEL_TABLE = 'bowel_log'; // v1.9 — Bristol Stool Scale log, sibling to weight/notes
+// Visible build version (shown in the header) so she can tell at a glance whether
+// a new build actually loaded. BUMP THIS TOGETHER WITH sw.js VERSION on every deploy.
+const APP_VERSION = 'v2.4';
 const HISTORY_DAYS = 30;
 const COOK_LOOKBACK_DAYS = 14; // cook sessions older than this are dropped from the runway strip
 const WEIGHT_PREVIEW_COUNT = 5; // last N weights shown collapsed on home
@@ -2510,11 +2513,16 @@ function render(): void {
   // Header
   const header = el('header', { class: 'app-header' });
   header.appendChild(el('h1', {}, ['Food Log']));
-  header.appendChild(
+  // Right side: the date + a tiny build-version tag (so she can tell at a glance
+  // whether a new build actually loaded). Grouped so the date stays right-aligned.
+  const headerMeta = el('div', { class: 'header-meta' });
+  headerMeta.appendChild(
     el('span', { class: 'header-sub' }, [
       new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
     ])
   );
+  headerMeta.appendChild(el('span', { class: 'app-version' }, [APP_VERSION]));
+  header.appendChild(headerMeta);
   app.appendChild(header);
 
   // Quick-action pills — restructured 2026-06-18 (surface-creep pullback to her

@@ -136,6 +136,19 @@ button {
   letter-spacing: var(--track-label);
 }
 
+/* Right-side meta group: date + tiny build-version tag, kept right-aligned. */
+.header-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.app-version {
+  font-size: var(--font-micro);
+  color: var(--text-dim-2);
+  letter-spacing: var(--track-label);
+}
+
 /* --- Cards ---------------------------------------------------------------- */
 
 .card {
