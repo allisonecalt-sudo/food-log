@@ -3,7 +3,26 @@
 Allison's food log — phone PWA, third in the personal-app family (budget-2026,
 workout-tracker, food-log).
 
-## What this is — v1.6
+## What this is NOW — v3.0 (Oct 13 2026): the food CHAT
+
+Her words (Tue Oct 13 2026, 21:16): _"It's just a chat. I say what I say. I
+record it. However I do it. Speak recorded, typed whatever picture. I just had
+it. It goes in. Nothing responsible. I just chatted and chatted and chatted and
+then you look at it. And yes questions."_ · _"Honestly just override my food app
+I have now. I don't even use it."_
+
+- **One screen:** thread + composer (type, phone-keyboard mic, 📷 photo, Send).
+- **Each message = one row in `food_chat`** (`said_at`, `text`, `photo_path`,
+  `handled_at`). Photos go to the `food-photos` bucket under `chat/YYYY/MM/`.
+- **The app sorts nothing.** Claude reads rows where `handled_at is null`, writes
+  `meals` rows (+ one `change_log` row each), sets `handled_at`, and asks her
+  questions in Claude Code. `handled_at` shows in the app as a quiet "✓ seen".
+- No signal → text waits on the phone ("waiting for signal") and sends itself
+  when the connection is back. A photo that fails stays in the composer.
+- The v2.5 app (meals / weight / cooks / notes / bowel) is in git history at
+  `0d04af2`; its tables and data are untouched.
+
+## History — v1.6
 
 Her words (May 2026): _"I wanted to be able to either take a picture or describe
 what I ate 'cause like let's say I just ate and I didn't take a picture so I

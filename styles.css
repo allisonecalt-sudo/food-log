@@ -1,1633 +1,273 @@
 /* ----------------------------------------------------------------------------
- * food-log — warm, food-friendly palette.
- *
- * v1.5 surface: a "meal" is the atom (0+ photos and/or a written/voice
- * description). Modal sheet drives entry. Meal cards on Today/History.
- *
- * v1.6 (2026-05-24) — vibe-first capture additions:
- *   - Two sibling pill buttons at the top: ➕ Meal + ⚖ Weight.
- *     (Bottom floating FAB removed — one entry surface, two parallel actions.)
- *   - Fuzzy time chips in both sheets (Now / Morning / Midday / Afternoon /
- *     Evening / Late / Custom). Custom expands the v1.5.1 split date+time.
- *   - Weight section below meals on home — sparkline + last-N list + Show all.
- *
- * Palette unchanged from v1 (cream / peach / olive). DM Sans for family
- * consistency. Logical inset properties so future RTL doesn't break.
+ * food-log v3 — the food CHAT (Oct 13 2026).
+ * One screen: header · thread · composer. Same warm cream / peach palette as
+ * v1–v2.5 (peach = the ONE primary action: Send). System font for speed —
+ * this is a quick-capture app now.
  * --------------------------------------------------------------------------- */
 
 :root {
-  /* --- Surfaces (warm cream stack) --------------------------------------- */
-  --bg: #fff4e6; /* page — soft cream, appetizing */
-  --bg-elev: #fffaf2; /* card surface — barely-lifted cream */
-  --bg-elev-2: #f5e8d4; /* input / pressed / chip backdrop */
-  --bg-elev-3: #ebd9bf; /* hover state */
-
-  /* --- Text -------------------------------------------------------------- */
-  --text: #3a2e1f; /* primary — warm dark brown, not pure black */
-  --text-dim: #7a6852; /* secondary, body-meta */
-  --text-dim-2: #a89579; /* tertiary (labels, small-caps) */
-
-  /* --- Borders (replaces box-shadow for elevation) ----------------------- */
+  --bg: #fff4e6;
+  --bg-elev: #fffaf2;
+  --bg-elev-2: #f5e8d4;
+  --text: #3a2e1f;
+  --text-dim: #7a6852;
+  --text-dim-2: #a89579;
   --border: rgba(58, 46, 31, 0.08);
   --border-strong: rgba(58, 46, 31, 0.16);
-  --border-divider: rgba(58, 46, 31, 0.05);
-
-  /* --- Accent roles ------------------------------------------------------ */
-  --accent: #e8825c; /* PRIMARY ACTION — warm peach */
-  --accent-hover: #f09779;
+  --accent: #e8825c;
   --accent-press: #d06b48;
-  --accent-secondary: #87a96b; /* olive — secondary/success */
-  --accent-warn: #d4a017; /* warm amber */
-  --accent-danger: #c0392b; /* destructive */
-
-  /* --- Radii ------------------------------------------------------------- */
-  --radius-sm: 10px;
-  --radius: 14px;
-  --radius-lg: 20px;
+  --ok: #87a96b;
+  --radius: 16px;
   --radius-pill: 999px;
-
-  /* --- Type scale -------------------------------------------------------- */
-  --font-display: 36px;
-  --font-heading: 28px;
-  --font-subheading: 22px;
-  --font-body: 17px;
-  --font-small: 15px;
-  --font-meta: 13px;
-  --font-micro: 11px;
-
-  --track-display: -0.02em;
-  --track-tight: -0.01em;
-  --track-label: 1.5px;
-
-  /* DM Sans for family consistency with sibling apps; fall back to system. */
-  --font-family:
-    'DM Sans', -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, system-ui, sans-serif;
-
-  /* --- Motion ------------------------------------------------------------ */
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --dur-base: 220ms;
+  --shadow: 0 1px 3px rgba(58, 46, 31, 0.08);
 }
 
-/* --- Reset + body ---------------------------------------------------------- */
-
-*,
-*::before,
-*::after {
+* {
   box-sizing: border-box;
 }
 
 html,
 body {
   margin: 0;
-  padding: 0;
+  height: 100%;
   background: var(--bg);
   color: var(--text);
-  font-family: var(--font-family);
-  font-size: var(--font-body);
-  line-height: 1.5;
-  -webkit-text-size-adjust: 100%;
-  -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    sans-serif;
+  font-size: 17px;
 }
 
-body {
-  min-height: 100vh;
-  min-height: 100dvh;
-  padding-bottom: env(safe-area-inset-bottom, 0);
-}
-
-button {
-  font-family: inherit;
-  cursor: pointer;
-  border: none;
-  background: none;
-  color: inherit;
-}
-
-/* --- Layout shell ---------------------------------------------------------- */
-
-.app {
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
   max-width: 640px;
   margin: 0 auto;
-  /* v1.6 removes the bottom FAB → less bottom padding needed. Keep a small
-   * cushion so the offline-toast doesn't sit flush with the screen edge. */
-  padding: 16px 16px 32px;
 }
+
+/* --- Header ---------------------------------------------------------------- */
 
 .app-header {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  margin-bottom: 20px;
-  padding-top: env(safe-area-inset-top, 12px);
+  padding: calc(12px + env(safe-area-inset-top)) 16px 10px;
+  border-bottom: 1px solid var(--border);
 }
 
-.app-header h1 {
-  font-size: var(--font-heading);
-  font-weight: 700;
-  letter-spacing: var(--track-tight);
+.app-title {
   margin: 0;
-}
-
-.app-header .header-sub {
-  font-size: var(--font-meta);
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: var(--track-label);
-}
-
-/* Right-side meta group: today's date, then a tiny build-version + date tag
- * under it — stacked + right-aligned so neither crowds the other. */
-.header-meta {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 2px;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
 .app-version {
-  font-size: var(--font-micro);
+  font-size: 11px;
   color: var(--text-dim-2);
-  letter-spacing: var(--track-label);
 }
 
-/* --- Cards ---------------------------------------------------------------- */
+/* --- Thread ---------------------------------------------------------------- */
 
-.card {
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 16px;
-  margin-bottom: 16px;
-}
-
-.card-header {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  margin-bottom: 12px;
-}
-
-.card-title {
-  font-size: var(--font-subheading);
-  font-weight: 600;
-  letter-spacing: var(--track-tight);
-  margin: 0;
-}
-
-.card-meta {
-  font-size: var(--font-meta);
-  color: var(--text-dim);
-}
-
-/* --- Meal list (Today + history days) ----------------------------------- */
-
-.meal-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.today-empty {
-  padding: 28px 8px;
-  text-align: center;
-  color: var(--text-dim);
-  font-size: var(--font-small);
-}
-
-/* Each meal card: a button so the whole row is tappable for the lightbox. */
-.meal-card {
-  display: block;
-  width: 100%;
-  text-align: start;
-  background: var(--bg-elev-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 12px;
-  transition: transform var(--dur-base) var(--ease-spring);
-}
-
-.meal-card:active {
-  transform: scale(0.985);
-  background: var(--bg-elev-3);
-}
-
-.meal-card-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 8px;
-}
-
-.meal-card-time {
-  font-size: var(--font-small);
-  font-weight: 700;
-  letter-spacing: 0.3px;
-  color: var(--text);
-}
-
-.meal-card-pending {
-  background: var(--accent-warn);
-  color: #3a2e1f;
-  font-size: var(--font-micro);
-  font-weight: 700;
-  letter-spacing: var(--track-label);
-  padding: 3px 8px;
-  border-radius: var(--radius-pill);
-  text-transform: uppercase;
-}
-
-.meal-card-photos {
-  display: flex;
-  gap: 6px;
-  overflow-x: auto;
-  margin-bottom: 8px;
-  padding-bottom: 2px;
-  -webkit-overflow-scrolling: touch;
-}
-
-.meal-card-photo {
-  flex: 0 0 auto;
-  width: 72px;
-  height: 72px;
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-}
-
-.meal-card-photo img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
-.meal-card-desc {
-  font-size: var(--font-small);
-  color: var(--text);
-  line-height: 1.4;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-.meal-card-desc-empty {
-  color: var(--text-dim-2);
-  font-style: italic;
-}
-
-/* --- History (collapsed prior days) -------------------------------------- */
-
-.history {
-  margin-top: 16px;
-}
-
-.history-day {
-  margin-bottom: 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-elev);
-  overflow: hidden;
-}
-
-.history-day-summary {
-  list-style: none;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 16px;
-  cursor: pointer;
-  user-select: none;
-}
-
-.history-day-summary::-webkit-details-marker {
-  display: none;
-}
-
-.history-day-title {
-  font-weight: 600;
-  letter-spacing: var(--track-tight);
-}
-
-.history-day-count {
-  font-size: var(--font-meta);
-  color: var(--text-dim);
-}
-
-.history-day-body {
-  padding: 0 16px 16px;
-}
-
-.history-empty {
-  padding: 20px;
-  text-align: center;
-  color: var(--text-dim);
-  font-size: var(--font-small);
-}
-
-/* --- Add-meal floating button --------------------------------------------- */
-
-.camera-fab {
-  position: fixed;
-  inset-inline: 0;
-  bottom: calc(24px + env(safe-area-inset-bottom, 0));
-  display: flex;
-  justify-content: center;
-  z-index: 50;
-  pointer-events: none; /* let the inner button capture, not the gutter */
-}
-
-.camera-fab-btn {
-  pointer-events: auto;
-  background: var(--accent);
-  color: #fff;
-  padding: 18px 32px;
-  border-radius: var(--radius-pill);
-  font-size: var(--font-body);
-  font-weight: 700;
-  letter-spacing: 0.3px;
-  border: 1px solid var(--accent-press);
-  box-shadow:
-    0 4px 14px rgba(208, 107, 72, 0.35),
-    0 1px 0 rgba(255, 255, 255, 0.4) inset;
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  transition: transform var(--dur-base) var(--ease-spring);
-}
-
-.camera-fab-btn:hover {
-  background: var(--accent-hover);
-}
-
-.camera-fab-btn:active {
-  transform: scale(0.94);
-  background: var(--accent-press);
-}
-
-.camera-fab-btn .camera-icon {
-  font-size: 22px;
-  line-height: 1;
-}
-
-.camera-input-hidden {
-  position: absolute;
-  width: 0;
-  height: 0;
-  opacity: 0;
-  pointer-events: none;
-}
-
-/* --- Toast --------------------------------------------------------------- */
-
-.toast {
-  position: fixed;
-  inset-inline: 16px;
-  bottom: calc(110px + env(safe-area-inset-bottom, 0));
-  margin: 0 auto;
-  max-width: 360px;
-  padding: 12px 18px;
-  background: rgba(58, 46, 31, 0.92);
-  color: #fff4e6;
-  border-radius: var(--radius);
-  font-size: var(--font-small);
-  text-align: center;
-  z-index: 200;
-  opacity: 0;
-  transform: translateY(8px);
-  transition:
-    opacity var(--dur-base) ease,
-    transform var(--dur-base) var(--ease-spring);
-  pointer-events: none;
-}
-
-.toast.visible {
-  opacity: 1;
-  transform: translateY(0);
-}
-
-/* --- Photo lightbox (meal detail) ---------------------------------------- */
-
-.lightbox {
-  position: fixed;
-  inset: 0;
-  background: rgba(58, 46, 31, 0.92);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 100;
-  padding: 24px;
+.thread {
+  flex: 1;
   overflow-y: auto;
-}
-
-.lightbox-inner {
+  padding: 12px 16px 16px;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  max-width: 720px;
-  width: 100%;
-}
-
-.lightbox-gallery {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  align-items: center;
-  width: 100%;
-  max-height: 60vh;
-  overflow-y: auto;
-}
-
-.lightbox-gallery img {
-  max-width: 100%;
-  max-height: 60vh;
-  border-radius: var(--radius);
-  object-fit: contain;
-}
-
-.lightbox-time {
-  color: #fff4e6;
-  margin-top: 16px;
-  font-size: var(--font-subheading);
-  font-weight: 600;
-  letter-spacing: var(--track-tight);
-}
-
-.lightbox-desc {
-  color: #fff4e6;
-  margin-top: 12px;
-  font-size: var(--font-body);
-  line-height: 1.5;
-  text-align: center;
-  white-space: pre-wrap;
-  max-width: 560px;
-}
-
-.lightbox-actions {
-  margin-top: 20px;
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-  justify-content: center;
-}
-
-.lightbox-close,
-.lightbox-edit {
-  background: rgba(255, 244, 230, 0.16);
-  color: #fff4e6;
-  padding: 10px 22px;
-  border-radius: var(--radius-pill);
-  border: 1px solid rgba(255, 244, 230, 0.24);
-  font-size: var(--font-small);
-  font-weight: 600;
-}
-
-.lightbox-edit {
-  background: var(--accent);
-  border-color: var(--accent-press);
-}
-
-.lightbox-delete {
-  background: transparent;
-  color: #fff4e6;
-  padding: 10px 22px;
-  border-radius: var(--radius-pill);
-  border: 1px solid var(--accent-danger);
-  font-size: var(--font-small);
-  font-weight: 600;
-  position: relative;
-  overflow: hidden;
-}
-
-.lightbox-delete .hold-fill {
-  position: absolute;
-  inset: 0;
-  background: var(--accent-danger);
-  transform-origin: left center;
-  transform: scaleX(0);
-  transition: transform 700ms linear;
-  z-index: 0;
-}
-
-.lightbox-delete.holding .hold-fill {
-  transform: scaleX(1);
-}
-
-.lightbox-delete-label {
-  position: relative;
-  z-index: 1;
-}
-
-/* --- Meal-entry sheet (modal) ------------------------------------------- */
-
-.sheet-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(58, 46, 31, 0.55);
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  z-index: 150;
-  padding: 0;
-}
-
-@media (min-width: 520px) {
-  .sheet-overlay {
-    align-items: center;
-    padding: 24px;
-  }
-}
-
-.sheet-panel {
-  background: var(--bg-elev);
-  width: 100%;
-  max-width: 560px;
-  max-height: 92vh;
-  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  border: 1px solid var(--border-strong);
-}
-
-@media (min-width: 520px) {
-  .sheet-panel {
-    border-radius: var(--radius-lg);
-    max-height: 90vh;
-  }
-}
-
-.sheet-topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 16px 20px;
-  border-bottom: 1px solid var(--border-divider);
-}
-
-.sheet-title {
-  margin: 0;
-  font-size: var(--font-subheading);
-  font-weight: 700;
-  letter-spacing: var(--track-tight);
-}
-
-.sheet-close {
-  font-size: 22px;
-  font-weight: 600;
-  color: var(--text-dim);
-  width: 36px;
-  height: 36px;
-  border-radius: var(--radius-pill);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.sheet-close:hover {
-  background: var(--bg-elev-2);
-  color: var(--text);
-}
-
-.sheet-body {
-  padding: 16px 20px;
-  overflow-y: auto;
-  flex: 1 1 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.sheet-field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.sheet-label {
-  font-size: var(--font-meta);
-  font-weight: 700;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: var(--track-label);
-}
-
-.sheet-when-row {
-  display: flex;
   gap: 8px;
-  align-items: stretch;
 }
 
-.sheet-date,
-.sheet-time {
+.thread-empty,
+.thread-note {
+  margin: auto;
+  color: var(--text-dim);
+  font-size: 15px;
+  text-align: center;
+}
+
+.thread-note {
+  margin: 0 auto 8px;
+}
+
+.day-divider {
+  align-self: center;
+  margin: 10px 0 2px;
+  padding: 3px 12px;
+  border-radius: var(--radius-pill);
   background: var(--bg-elev-2);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  padding: 12px 14px;
-  font-size: var(--font-body);
-  font-family: inherit;
-  color: var(--text);
-  flex: 1 1 0;
-  min-width: 0;
-}
-
-.sheet-now-btn {
-  background: var(--bg-elev-2);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  padding: 12px 16px;
-  font-size: var(--font-body);
-  font-family: inherit;
-  font-weight: 600;
-  color: var(--accent-primary);
-  cursor: pointer;
-  flex: 0 0 auto;
-}
-
-.sheet-now-btn:active {
-  transform: scale(0.97);
-}
-
-.sheet-desc {
-  background: var(--bg-elev-2);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  padding: 12px 14px;
-  font-size: var(--font-body);
-  font-family: inherit;
-  color: var(--text);
-  width: 100%;
-  resize: vertical;
-  min-height: 88px;
-  line-height: 1.45;
-}
-
-.sheet-desc::placeholder {
-  color: var(--text-dim-2);
-}
-
-.sheet-thumbs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-bottom: 8px;
-}
-
-.sheet-thumb {
-  position: relative;
-  width: 92px;
-  height: 92px;
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-  background: var(--bg-elev-2);
-  border: 1px solid var(--border);
-}
-
-.sheet-thumb img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
-.sheet-thumb-removed {
-  opacity: 0.4;
-}
-
-.sheet-thumb-remove,
-.sheet-thumb-restore {
-  position: absolute;
-  inset-block-start: 4px;
-  inset-inline-end: 4px;
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  background: rgba(58, 46, 31, 0.78);
-  color: #fff4e6;
+  color: var(--text-dim);
   font-size: 13px;
-  line-height: 1;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
 }
 
-.sheet-thumb-reorder {
-  position: absolute;
-  inset-block-end: 4px;
-  inset-inline-start: 4px;
-  display: flex;
-  gap: 2px;
-}
-
-.sheet-thumb-arrow {
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
-  background: rgba(58, 46, 31, 0.78);
-  color: #fff4e6;
-  font-size: 12px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.sheet-thumb-arrow[disabled] {
-  opacity: 0.35;
-  cursor: default;
-}
-
-.sheet-add-photo {
-  align-self: flex-start;
-  background: var(--bg-elev-2);
-  color: var(--text);
-  border: 1px dashed var(--border-strong);
-  border-radius: var(--radius);
-  padding: 10px 16px;
-  font-size: var(--font-small);
-  font-weight: 600;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.sheet-add-photo:hover {
-  background: var(--bg-elev-3);
-}
-
-.sheet-footer {
-  display: flex;
-  gap: 10px;
-  padding: 14px 20px calc(14px + env(safe-area-inset-bottom, 0));
-  border-top: 1px solid var(--border-divider);
+.bubble {
+  align-self: flex-end;
+  max-width: 85%;
+  padding: 8px 12px 6px;
+  border-radius: var(--radius) var(--radius) 4px var(--radius);
   background: var(--bg-elev);
-}
-
-.sheet-cancel {
-  flex: 0 0 auto;
-  background: var(--bg-elev-2);
-  color: var(--text);
-  padding: 12px 18px;
-  border-radius: var(--radius-pill);
-  font-size: var(--font-small);
-  font-weight: 600;
   border: 1px solid var(--border);
+  box-shadow: var(--shadow);
 }
 
-.sheet-save {
-  flex: 1 1 auto;
-  background: var(--accent);
-  color: #fff;
-  padding: 12px 24px;
-  border-radius: var(--radius-pill);
-  font-size: var(--font-body);
-  font-weight: 700;
-  letter-spacing: 0.3px;
-  border: 1px solid var(--accent-press);
-}
-
-.sheet-save:hover {
-  background: var(--accent-hover);
-}
-
-.sheet-save[disabled] {
-  background: var(--bg-elev-3);
-  color: var(--text-dim-2);
-  border-color: var(--border);
-  cursor: not-allowed;
-}
-
-/* --- Status / pending banner --------------------------------------------- */
-
-.queue-banner {
-  display: none;
-  margin: -4px 0 12px;
-  padding: 10px 14px;
-  background: var(--accent-warn);
-  color: #3a2e1f;
-  border-radius: var(--radius);
-  font-size: var(--font-small);
-  font-weight: 600;
-  text-align: center;
-}
-
-.queue-banner.visible {
-  display: block;
-}
-
-/* --- Visually-hidden helper for a11y ------------------------------------- */
-
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
-}
-
-/* ----------------------------------------------------------------------------
- * v1.6 additions
- * --------------------------------------------------------------------------- */
-
-/* --- Sibling quick-action pills (replace the bottom FAB) ----------------- */
-
-.quick-actions {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 16px;
-}
-
-.quick-action {
-  flex: 1 1 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 14px 18px;
-  border-radius: var(--radius-pill);
-  font-size: var(--font-body);
-  font-weight: 700;
-  letter-spacing: 0.3px;
-  transition: transform var(--dur-base) var(--ease-spring);
-}
-
-.quick-action:active {
-  transform: scale(0.97);
-}
-
-.quick-action-primary {
-  background: var(--accent);
-  color: #fff;
-  border: 1px solid var(--accent-press);
-  box-shadow:
-    0 3px 10px rgba(208, 107, 72, 0.3),
-    0 1px 0 rgba(255, 255, 255, 0.4) inset;
-}
-
-.quick-action-primary:hover {
-  background: var(--accent-hover);
-}
-
-.quick-action-secondary {
-  background: var(--accent-secondary);
-  color: #fff;
-  border: 1px solid #6e8a52;
-  box-shadow:
-    0 3px 10px rgba(110, 138, 82, 0.28),
-    0 1px 0 rgba(255, 255, 255, 0.4) inset;
-}
-
-.quick-action-secondary:hover {
-  background: #97b97a;
-}
-
-.quick-icon {
-  font-size: 20px;
-  line-height: 1;
-}
-
-/* --- Fuzzy time chip row (meal + weight sheets) ------------------------- */
-
-.sheet-label-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.sheet-chip-display {
-  font-size: var(--font-small);
-  font-weight: 600;
-  color: var(--text);
-}
-
-.chip-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.chip {
-  background: var(--bg-elev-2);
-  color: var(--text);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-pill);
-  padding: 8px 14px;
-  font-size: var(--font-small);
-  font-weight: 600;
-  letter-spacing: 0.2px;
-  font-family: inherit;
-  transition:
-    background var(--dur-base) ease,
-    color var(--dur-base) ease,
-    transform var(--dur-base) var(--ease-spring);
-}
-
-.chip:active {
-  transform: scale(0.95);
-}
-
-.chip-selected {
-  background: var(--accent);
-  color: #fff;
-  border-color: var(--accent-press);
-}
-
-/* Custom-mode date+time row sits beneath chips and only shows when the
- * Custom chip is selected. Keeps the v1.5.1 inputs as-is. */
-.sheet-custom-row {
-  display: none;
-  gap: 8px;
-  align-items: stretch;
-  margin-top: 8px;
-}
-
-.sheet-custom-row.visible {
-  display: flex;
-}
-
-/* --- Weight numeric input ------------------------------------------------ */
-
-.sheet-weight-input {
-  background: var(--bg-elev-2);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  padding: 12px 14px;
-  font-size: var(--font-subheading);
-  font-weight: 600;
-  font-family: inherit;
-  color: var(--text);
-  width: 100%;
-}
-
-.sheet-weight-input::placeholder {
-  color: var(--text-dim-2);
-  font-weight: 400;
-}
-
-/* --- Weight section on home --------------------------------------------- */
-
-.weight-section {
-  margin-top: 16px;
-}
-
-.weight-spark {
+.bubble-photo {
   display: block;
   width: 100%;
-  color: var(--accent-secondary);
-  margin: 4px 0 12px;
+  max-height: 320px;
+  object-fit: cover;
+  border-radius: 10px;
+  margin-bottom: 6px;
 }
 
-.weight-list {
+.bubble-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+
+.bubble-meta {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.weight-row {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  grid-template-rows: auto auto;
-  gap: 2px 12px;
-  width: 100%;
-  text-align: start;
-  background: var(--bg-elev-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 12px 14px;
-  transition: transform var(--dur-base) var(--ease-spring);
-}
-
-.weight-row:active {
-  transform: scale(0.985);
-  background: var(--bg-elev-3);
-}
-
-.weight-row-kg {
-  grid-column: 1;
-  grid-row: 1;
-  font-weight: 700;
-  font-size: var(--font-body);
-  color: var(--text);
-  letter-spacing: 0.2px;
-}
-
-.weight-row-meta {
-  grid-column: 2;
-  grid-row: 1;
-  font-size: var(--font-small);
-  color: var(--text-dim);
-  text-align: end;
-  display: inline-flex;
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-}
-
-.weight-row-pending {
-  background: var(--accent-warn);
-  color: #3a2e1f;
-  font-size: var(--font-micro);
-  font-weight: 700;
-  letter-spacing: var(--track-label);
-  padding: 2px 6px;
-  border-radius: var(--radius-pill);
-  text-transform: uppercase;
-}
-
-.weight-row-notes {
-  grid-column: 1 / -1;
-  grid-row: 2;
-  font-size: var(--font-small);
-  color: var(--text-dim);
   margin-top: 2px;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+  font-size: 12px;
+  color: var(--text-dim-2);
 }
 
-.weight-toggle {
-  align-self: center;
-  margin-top: 12px;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: var(--font-meta);
-  font-weight: 600;
-  letter-spacing: var(--track-label);
-  text-transform: uppercase;
-  padding: 6px 10px;
+.status-sent {
+  color: var(--ok);
 }
 
-.weight-toggle:hover {
-  color: var(--text);
-}
-
-/* --- Weight lightbox kg display ----------------------------------------- */
-
-.lightbox-weight-kg {
-  color: #fff4e6;
-  font-size: var(--font-display);
-  font-weight: 700;
-  letter-spacing: var(--track-display);
-  margin-bottom: 8px;
-}
-
-/* ----------------------------------------------------------------------------
- * v1.7 additions — cook sessions, lb/kg unit toggle, per-day add affordance
- * --------------------------------------------------------------------------- */
-
-/* --- 3rd quick-action button + tertiary color ---------------------------- */
-
-/* The three pills wrap on narrow screens so labels stay legible. */
-.quick-actions-three {
-  flex-wrap: wrap;
-}
-
-.quick-action-tertiary {
-  background: var(--accent-warn); /* warm amber sits between peach + olive */
-  color: #3a2e1f;
-  border: 1px solid #a87d0e;
-  box-shadow:
-    0 3px 10px rgba(212, 160, 23, 0.28),
-    0 1px 0 rgba(255, 255, 255, 0.4) inset;
-}
-
-.quick-action-tertiary:hover {
-  background: #e3b231;
-}
-
-/* --- Cook strip on home -------------------------------------------------- */
-
-.cook-strip {
-  /* Sits above Today; gentle differentiation via a thin amber accent edge. */
-  border-left: 3px solid var(--accent-warn);
-}
-
-.cook-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.cook-card {
-  display: block;
-  width: 100%;
-  text-align: start;
-  background: var(--bg-elev-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 12px;
-  transition: transform var(--dur-base) var(--ease-spring);
-}
-
-.cook-card:active {
-  transform: scale(0.985);
-  background: var(--bg-elev-3);
-}
-
-.cook-card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 4px;
-}
-
-.cook-card-title {
-  font-weight: 700;
-  font-size: var(--font-body);
-  color: var(--text);
-  letter-spacing: 0.2px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.cook-card-meta {
-  font-size: var(--font-meta);
-  color: var(--text-dim);
-  margin-bottom: 4px;
-}
-
-.cook-card-runway {
-  font-size: var(--font-small);
-  color: var(--text);
-  font-weight: 600;
-}
-
-.cook-card-runway-dim {
-  color: var(--text-dim);
-  font-weight: 500;
-  font-style: italic;
-}
-
-.cook-card-days {
-  color: var(--text-dim);
-  font-weight: 500;
-}
-
-.cook-card-hint {
-  margin-top: 4px;
-  font-size: var(--font-meta);
+.status-waiting {
   color: var(--accent-press);
-  font-weight: 600;
 }
 
-/* --- Cook-session pick row inside the meal sheet ------------------------- */
-
-.cook-pick-row {
-  margin-top: 2px;
+.bubble-delete {
+  border: 0;
+  background: none;
+  color: var(--text-dim-2);
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 4px;
+  cursor: pointer;
 }
 
-.cook-pick-chip {
-  /* Wider than the time chips because the labels embed description + when + left. */
-  max-width: 100%;
-  text-align: start;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+/* --- Composer -------------------------------------------------------------- */
+
+.composer {
+  padding: 8px 12px calc(10px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+  background: var(--bg);
 }
 
-.sheet-field-tight {
-  margin-top: 4px;
-  gap: 4px;
+.composer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
 }
 
-/* --- Per-day "+ Add meal here" inside history accordion ----------------- */
-
-.history-add-meal {
-  margin-top: 10px;
-  width: 100%;
+.composer-camera {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
   background: var(--bg-elev-2);
-  color: var(--text);
-  border: 1px dashed var(--border-strong);
-  border-radius: var(--radius);
+  font-size: 20px;
+  cursor: pointer;
+}
+
+.composer-input {
+  flex: 1;
+  min-height: 44px;
+  max-height: 140px;
   padding: 10px 14px;
-  font-size: var(--font-small);
-  font-weight: 600;
-  text-align: center;
-  transition:
-    background var(--dur-base) ease,
-    transform var(--dur-base) var(--ease-spring);
-}
-
-.history-add-meal:hover {
-  background: var(--bg-elev-3);
-}
-
-.history-add-meal:active {
-  transform: scale(0.985);
-}
-
-/* --- Unit toggle (kg | lb) in weight sheet ------------------------------ */
-
-.unit-toggle {
-  display: inline-flex;
-  gap: 2px;
-  background: var(--bg-elev-2);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-pill);
-  padding: 2px;
+  border-radius: 22px;
+  background: var(--bg-elev);
+  color: var(--text);
+  font: inherit;
+  resize: none;
+  line-height: 1.3;
 }
 
-.unit-toggle-btn {
-  font-family: inherit;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: var(--font-small);
-  font-weight: 700;
-  padding: 4px 14px;
-  border-radius: var(--radius-pill);
-  text-transform: lowercase;
-  letter-spacing: 0.4px;
-  transition:
-    background var(--dur-base) ease,
-    color var(--dur-base) ease;
+.composer-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 0;
 }
 
-.unit-toggle-selected {
+.composer-send {
+  flex: 0 0 auto;
+  height: 44px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: var(--radius-pill);
   background: var(--accent);
   color: #fff;
-}
-
-.unit-toggle-btn:active {
-  transform: scale(0.95);
-}
-
-/* ----------------------------------------------------------------------------
- * v1.8 additions — notes (scratchpad surface)
- *
- * Notes are a sibling surface to meals/weight/cooks. Always-on top-bar pill +
- * compact list section at the bottom of the home page. Pure capture, no
- * structure: timestamp + text.
- *
- * UX rationale (2026-05-27): ~3 of 22 meal entries were app-meta thoughts
- * typed into meals.description because there was no other surface. The Notes
- * pill ships always-visible (vs Cooked which is conditional) because the need
- * pre-dates the data — she's already been doing this informally.
- * --------------------------------------------------------------------------- */
-
-/* --- 4-pill layout: wrap into a tidy 2x2 grid on narrow screens ---------- */
-/* With four pills a single row gets cramped at 412px; force each pill to ~50%
- * basis so wrapping gives a clean 2x2 (Meal+Cooked on row 1, Weight+Note on
- * row 2 in insert order). 3-pill state keeps the existing .quick-actions-three
- * wrap-allowed flex behavior (three slim pills fit on one row at 412px). */
-.quick-actions-four {
-  flex-wrap: wrap;
-}
-
-.quick-actions-four .quick-action {
-  flex: 1 1 calc(50% - 5px);
-  min-width: 0;
-}
-
-/* --- Quaternary pill (Notes) --------------------------------------------- */
-/* Lavender-tinted to sit visually apart from the food/body/cook triad while
- * staying within the warm-cream palette feel. */
-.quick-action-quaternary {
-  background: #9b8db8;
-  color: #fff;
-  border: 1px solid #7c6e9c;
-  box-shadow:
-    0 3px 10px rgba(124, 110, 156, 0.28),
-    0 1px 0 rgba(255, 255, 255, 0.4) inset;
-}
-
-.quick-action-quaternary:hover {
-  background: #ab9ec8;
-}
-
-/* --- Notes section on home ----------------------------------------------- */
-.notes-section {
-  margin-top: 16px;
-  /* Match the weight-section accent style — thin accent edge to differentiate
-   * sibling surfaces without adding card-chrome noise. */
-  border-left: 3px solid #9b8db8;
-}
-
-.note-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.note-row {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  width: 100%;
-  text-align: start;
-  background: var(--bg-elev-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 12px 14px;
-  transition: transform var(--dur-base) var(--ease-spring);
-}
-
-.note-row:active {
-  transform: scale(0.985);
-  background: var(--bg-elev-3);
-}
-
-.note-row-meta {
-  font-size: var(--font-meta);
-  color: var(--text-dim);
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.note-row-pending {
-  background: var(--accent-warn);
-  color: #3a2e1f;
-  font-size: var(--font-micro);
-  font-weight: 700;
-  letter-spacing: var(--track-label);
-  padding: 2px 6px;
-  border-radius: var(--radius-pill);
-  text-transform: uppercase;
-}
-
-.note-row-text {
-  font-size: var(--font-small);
-  color: var(--text);
-  line-height: 1.45;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  white-space: pre-wrap;
-}
-
-/* ----------------------------------------------------------------------------
- * v1.9 additions — bowel log (Bristol Stool Scale)
- *
- * A sibling surface to weight/notes: timestamp + Bristol type (1–7) + optional
- * note. Always-on top-bar pill + compact list section directly below the meal
- * history (adjacency is intentional — the purpose is correlating bowel type
- * against the prior ~48h of food for flare data).
- *
- * Earthy clay/brown accent (#a07e5c) distinguishes it from the food (peach),
- * body (olive), cook (amber), and note (lavender) surfaces while staying in the
- * warm-cream palette.
- * --------------------------------------------------------------------------- */
-
-/* --- 5-pill layout: 3 on row 1, 2 on row 2, all legible at 412px ---------- */
-.quick-actions-five {
-  flex-wrap: wrap;
-}
-
-.quick-actions-five .quick-action {
-  flex: 1 1 calc(33.333% - 7px);
-  min-width: 0;
-}
-
-/* --- Quinary pill (Bowel) ------------------------------------------------- */
-.quick-action-quinary {
-  background: #a07e5c;
-  color: #fff;
-  border: 1px solid #7f6347;
-  box-shadow:
-    0 3px 10px rgba(160, 126, 92, 0.28),
-    0 1px 0 rgba(255, 255, 255, 0.4) inset;
-}
-
-.quick-action-quinary:hover {
-  background: #b08e6a;
-}
-
-/* --- "More" disclosure pill (Note + Cooked live behind it) --------------- *
- * Deliberately QUIET — no accent fill, no shadow — so it reads as "more
- * options," not another capture. Keeps the primary trio (Meal/Weight/Bowel)
- * visually dominant and the top close to her "two sibling pills" calm. */
-.quick-action-more {
-  background: var(--bg-elev-2);
-  color: var(--text-dim);
-  border: 1px solid var(--border-strong);
-  box-shadow: none;
-}
-
-.quick-action-more:hover {
-  background: var(--bg-elev-3);
-  color: var(--text);
-}
-
-.quick-action-more-open {
-  background: var(--bg-elev-3);
-  color: var(--text);
-}
-
-/* --- Bristol type selector (bowel sheet) --------------------------------- */
-.bristol-selector {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.bristol-option {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  width: 100%;
-  text-align: start;
-  background: var(--bg-elev-2);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  padding: 9px 12px;
-  font-family: inherit;
-  transition:
-    background var(--dur-base) ease,
-    border-color var(--dur-base) ease,
-    transform var(--dur-base) var(--ease-spring);
-}
-
-.bristol-option:active {
-  transform: scale(0.985);
-}
-
-.bristol-selected {
-  background: rgba(160, 126, 92, 0.16);
-  border-color: #a07e5c;
-}
-
-.bristol-num {
-  flex: 0 0 auto;
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--bg-elev-3);
-  color: var(--text);
-  border: 1px solid var(--border-strong);
-  font-weight: 700;
-  font-size: var(--font-small);
-}
-
-.bristol-selected .bristol-num {
-  background: #a07e5c;
-  color: #fff;
-  border-color: #7f6347;
-}
-
-/* Label + hint sit on ONE line (was stacked) so the 7-row selector — and the
- * whole bowel sheet — is shorter and reachable with little/no scroll. Wraps
- * gracefully if a label+hint is ever too wide for the row. */
-.bristol-text {
-  display: flex;
-  flex-direction: row;
-  align-items: baseline;
-  flex-wrap: wrap;
-  column-gap: 8px;
-  row-gap: 1px;
-  min-width: 0;
-}
-
-.bristol-label {
-  font-size: var(--font-small);
+  font: inherit;
   font-weight: 600;
-  color: var(--text);
+  cursor: pointer;
 }
 
-.bristol-hint {
-  font-size: var(--font-micro);
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: var(--track-label);
+.composer-send:active {
+  background: var(--accent-press);
 }
 
-/* Quiet marker on a weight row whose note is Claude maintenance/correction text
- * (kept in the detail view, but not cluttering the clean home list). */
-.weight-row-edited {
-  font-size: var(--font-micro);
-  color: var(--text-dim-2);
-  text-transform: uppercase;
-  letter-spacing: var(--track-label);
-  font-style: italic;
-}
-
-/* --- Bowel section on home ----------------------------------------------- */
-.bowel-section {
-  margin-top: 16px;
-  border-left: 3px solid #a07e5c;
-}
-
-.bowel-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.bowel-row {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  grid-template-rows: auto auto;
-  gap: 2px 12px;
-  width: 100%;
-  text-align: start;
-  background: var(--bg-elev-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 12px 14px;
-  transition: transform var(--dur-base) var(--ease-spring);
-}
-
-.bowel-row:active {
-  transform: scale(0.985);
-  background: var(--bg-elev-3);
-}
-
-.bowel-row-type {
-  grid-column: 1;
-  grid-row: 1 / span 2;
-  align-self: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: #a07e5c;
-  color: #fff;
-  font-weight: 700;
-  font-size: var(--font-body);
-}
-
-.bowel-row-label {
-  grid-column: 2;
-  grid-row: 1;
-  font-weight: 700;
-  font-size: var(--font-body);
-  color: var(--text);
-  letter-spacing: 0.2px;
-}
-
-.bowel-row-meta {
-  grid-column: 2;
-  grid-row: 2;
-  font-size: var(--font-small);
-  color: var(--text-dim);
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.bowel-row-hint {
-  font-size: var(--font-micro);
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: var(--track-label);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-pill);
-  padding: 1px 6px;
-}
-
-.bowel-row-pending {
-  background: var(--accent-warn);
-  color: #3a2e1f;
-  font-size: var(--font-micro);
-  font-weight: 700;
-  letter-spacing: var(--track-label);
-  padding: 2px 6px;
-  border-radius: var(--radius-pill);
-  text-transform: uppercase;
-}
-
-.bowel-row-note {
-  grid-column: 1 / -1;
-  grid-row: 3;
-  font-size: var(--font-small);
-  color: var(--text-dim);
-  margin-top: 2px;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-/* --- Bowel lightbox (detail view) ---------------------------------------- */
-.lightbox-bowel-type {
-  color: #fff4e6;
-  font-size: var(--font-display);
-  font-weight: 700;
-  letter-spacing: var(--track-display);
-  margin-bottom: 4px;
-}
-
-.lightbox-bowel-label {
-  color: #fff4e6;
-  font-size: var(--font-subheading);
-  font-weight: 600;
-  opacity: 0.92;
+.photo-preview {
+  position: relative;
+  width: 84px;
   margin-bottom: 8px;
+}
+
+.photo-preview img {
+  width: 84px;
+  height: 84px;
+  object-fit: cover;
+  border-radius: 12px;
+}
+
+.photo-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--text);
+  color: var(--bg);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* --- Toast ----------------------------------------------------------------- */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(90px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  max-width: 90vw;
+  padding: 10px 16px;
+  border-radius: var(--radius-pill);
+  background: var(--text);
+  color: var(--bg);
+  font-size: 14px;
 }

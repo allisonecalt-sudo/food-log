@@ -1,7 +1,7 @@
 {
   "name": "Food Log",
   "short_name": "Food Log",
-  "description": "Photo-based food log — tap camera, snap meal, save photo + timestamp.",
+  "description": "Food chat — say what you ate, Claude sorts it later.",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
